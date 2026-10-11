@@ -40,8 +40,8 @@ pcall(function() ScreenGui.Parent = CoreGui end)
 if not ScreenGui.Parent then ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
 
 local Main = Instance.new("Frame")
-Main.Size = UDim2.new(0, 520, 0, 320)
-Main.Position = UDim2.new(0.5, -260, 0.5, -160)
+Main.Size = UDim2.new(0, 520, 0, 400)
+Main.Position = UDim2.new(0.5, -260, 0.5, -200)
 Main.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
 Main.BorderSizePixel = 0
 Main.Active = true
@@ -184,12 +184,18 @@ SidebarLayout.SortOrder = Enum.SortOrder.LayoutOrder
 SidebarLayout.Padding = UDim.new(0, 6)
 SidebarLayout.Parent = Sidebar
 
-local Content = Instance.new("Frame")
+local Content = Instance.new("ScrollingFrame")
 Content.Size = UDim2.new(1, -165, 1, -50)
 Content.Position = UDim2.new(0, 155, 0, 45)
 Content.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
 Content.BorderSizePixel = 0
 Content.BackgroundTransparency = 1
+Content.ScrollBarThickness = 4
+Content.ScrollBarImageColor3 = Color3.fromRGB(255, 140, 40)
+Content.ScrollBarImageTransparency = 0.3
+Content.CanvasSize = UDim2.new(0, 0, 0, 0)
+Content.AutomaticCanvasSize = Enum.AutomaticSize.Y
+Content.ScrollingDirection = Enum.ScrollingDirection.Y
 Content.Parent = Main
 
 local ContentCorner = Instance.new("UICorner")
@@ -207,6 +213,9 @@ local ContentLayout = Instance.new("UIListLayout")
 ContentLayout.SortOrder = Enum.SortOrder.LayoutOrder
 ContentLayout.Padding = UDim.new(0, 8)
 ContentLayout.Parent = Content
+
+-- Контейнер для вкладок (внутри ScrollingFrame)
+-- Вкладки создаются как отдельные Frame'ы внутри Content
 
 local ContentTitle = Instance.new("TextLabel")
 ContentTitle.Size = UDim2.new(1, 0, 0, 25)
@@ -242,7 +251,7 @@ local function createTab(name, displayName)
     BtnPad.Parent = TabButton
 
     local TabContainer = Instance.new("Frame")
-    TabContainer.Size = UDim2.new(1, 0, 1, -35)
+    TabContainer.Size = UDim2.new(1, -10, 1, -35)  -- -10 для скроллбара
     TabContainer.Position = UDim2.new(0, 0, 0, 35)
     TabContainer.BackgroundTransparency = 1
     TabContainer.Visible = false
@@ -288,6 +297,7 @@ tabs["RAGE"].Container.Visible = true
 -- =========================================================
 local function makeToggle(parent, labelText, default, callback)
     local state = default or false
+    local lastClick = 0
 
     local Frame = Instance.new("Frame")
     Frame.Size = UDim2.new(1, 0, 0, 36)
@@ -362,6 +372,9 @@ local function makeToggle(parent, labelText, default, callback)
     updateVisual()
 
     Btn.MouseButton1Click:Connect(function()
+        local now = tick()
+        if now - lastClick < 0.3 then return end  -- анти-двойной клик
+        lastClick = now
         state = not state
         updateVisual()
         if callback then pcall(callback, state) end
@@ -1162,6 +1175,65 @@ LocalPlayer.CharacterAdded:Connect(function(char)
 end)
 
 -- =========================================================
+-- MISC: FAST ALIVE — авто-клик по кнопке "ВОЗРОЖДЕНИЕ"
+-- =========================================================
+
+local FAST_ALIVE = {
+    Enabled = false,
+    SpamTask = nil,
+}
+
+-- Эмулируем нажатие пробела (реальная клавиша)
+local function pressSpace()
+    pcall(function()
+        local VirtualInputManager = game:GetService("VirtualInputManager")
+        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
+        task.wait(0.02)
+        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
+    end)
+end
+
+-- Основной цикл спама пробела пока мёртв
+local function startSpamming()
+    if FAST_ALIVE.SpamTask then return end
+    FAST_ALIVE.SpamTask = task.spawn(function()
+        while FAST_ALIVE.Enabled do
+            local char = LocalPlayer.Character
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+
+            if not char or not hum or hum.Health <= 0 then
+                -- Персонаж мёртв — СПАМИМ ПРОБЕЛ
+                for i = 1, 30 do
+                    if not FAST_ALIVE.Enabled then return end
+                    pressSpace()
+                    task.wait(0.03)
+                end
+            else
+                -- Жив — проверяем через 0.5 сек
+                task.wait(0.5)
+            end
+        end
+    end)
+end
+
+local function stopSpamming()
+    if FAST_ALIVE.SpamTask then
+        pcall(function() task.cancel(FAST_ALIVE.SpamTask) end)
+        FAST_ALIVE.SpamTask = nil
+    end
+end
+
+-- UI тумблер
+makeToggle(tabs["Misc"].Container, "Fast Alive", false, function(v)
+    FAST_ALIVE.Enabled = v
+    if v then
+        startSpamming()
+    else
+        stopSpamming()
+    end
+end)
+
+-- =========================================================
 -- MISC: HITBOX EXPANDER (только Head, оптимизировано)
 -- =========================================================
 
@@ -1305,6 +1377,105 @@ makeSlider(tabs["Misc"].Container, "Hitbox Size", 5, 100, 30, function(v)
 end)
 
 -- =========================================================
+-- MISC: MAGNET — телепортирует ВСЕХ врагов к прицелу + автофаер
+-- =========================================================
+
+local MAGNET = {
+    Enabled = false,
+    Connection = nil,
+}
+
+-- Точка прицела: 5 студов перед камерой
+local function getAimPoint()
+    local camera = workspace.CurrentCamera
+    if not camera then return nil end
+    return camera.CFrame.Position + camera.CFrame.LookVector * 5
+end
+
+-- Телепорт модели в точку
+local function teleportModel(model, targetPos)
+    if not model or not model.Parent then return end
+    local myChar = LocalPlayer.Character
+    if model == myChar then return end
+
+    local hum = model:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then return end
+
+    for _, part in ipairs(model:GetDescendants()) do
+        if part:IsA("BasePart") then
+            part.CanCollide = false
+            part.CFrame = CFrame.new(targetPos)
+        end
+    end
+end
+
+-- Сбор всех врагов (игроки + боты)
+local function getAllEnemies()
+    local enemies = {}
+    local myChar = LocalPlayer.Character
+
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer and plr.Character and plr.Character ~= myChar then
+            local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+            if hum and hum.Health > 0 then
+                table.insert(enemies, plr.Character)
+            end
+        end
+    end
+
+    local function scan(container)
+        for _, obj in ipairs(container:GetChildren()) do
+            if obj:IsA("Model") and obj ~= myChar and not Players:GetPlayerFromCharacter(obj) then
+                local hum = obj:FindFirstChildOfClass("Humanoid")
+                if hum and hum.Health > 0 then
+                    table.insert(enemies, obj)
+                end
+            elseif obj:IsA("Folder") or (obj:IsA("Model") and not obj:FindFirstChildOfClass("Humanoid")) then
+                scan(obj)
+            end
+        end
+    end
+    scan(workspace)
+
+    return enemies
+end
+
+-- Основной цикл Magnet — каждый кадр телепорт + автофаер
+local function startMagnet()
+    if MAGNET.Connection then return end
+
+    MAGNET.Connection = RunService.RenderStepped:Connect(function()
+        if not MAGNET.Enabled then return end
+
+        local aimPoint = getAimPoint()
+        if not aimPoint then return end
+
+        -- Телепортируем всех врагов в точку прицела
+        for _, enemy in ipairs(getAllEnemies()) do
+            pcall(teleportModel, enemy, aimPoint)
+        end
+
+    end)
+end
+
+local function stopMagnet()
+    if MAGNET.Connection then
+        MAGNET.Connection:Disconnect()
+        MAGNET.Connection = nil
+    end
+end
+
+-- ЕДИНСТВЕННЫЙ ТУМБЛЕР — никаких настроек
+makeToggle(tabs["Misc"].Container, "Magnet", false, function(v)
+    MAGNET.Enabled = v
+    if v then
+        startMagnet()
+    else
+        stopMagnet()
+    end
+end)
+
+-- =========================================================
 -- KEYBIND: K — открыть/закрыть GUI
 -- =========================================================
 local guiVisible = false
@@ -1411,6 +1582,24 @@ local function unloadScript()
             end
             HITBOX.Modified = {}
         end)
+    end
+
+    -- 5.4) Отключаем Fast Alive
+    if FAST_ALIVE then
+        FAST_ALIVE.Enabled = false
+        if FAST_ALIVE.SpamTask then
+            pcall(function() task.cancel(FAST_ALIVE.SpamTask) end)
+            FAST_ALIVE.SpamTask = nil
+        end
+    end
+
+    -- 5.5) Отключаем Magnet
+    if MAGNET then
+        MAGNET.Enabled = false
+        if MAGNET.Connection then
+            pcall(function() MAGNET.Connection:Disconnect() end)
+            MAGNET.Connection = nil
+        end
     end
 
     -- 6) Очищаем ссылки
