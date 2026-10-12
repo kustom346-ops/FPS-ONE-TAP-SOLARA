@@ -243,7 +243,7 @@ local function attachMouseWheelScroll(scrollingFrame)
 end
 
 -- Глобальный слушатель колеса — крутит активный ScrollingFrame
-UserInputService.InputChanged:Connect(function(input, gameProcessed)
+local scrollConnection = UserInputService.InputChanged:Connect(function(input, gameProcessed)
     if input.UserInputType ~= Enum.UserInputType.MouseWheel then return end
     if not ScreenGui.Enabled then return end
 
@@ -1475,6 +1475,9 @@ local BUNNY_HOP = {
     Enabled = false,
     Connection = nil,
     LastJump = 0,
+    Speed = 49,
+    StrafeFix = true,
+    StrafeConnection = nil,
 }
 
 local function onBunnyHop()
@@ -1499,10 +1502,99 @@ local function onBunnyHop()
         end
     end
 
-    -- Непрерывно держим скорость 49 (даже если игра сбрасывает)
-    if hum.WalkSpeed ~= 49 then
-        hum.WalkSpeed = 49
+    -- Непрерывно держим выбранную скорость
+    if hum.WalkSpeed ~= BUNNY_HOP.Speed then
+        hum.WalkSpeed = BUNNY_HOP.Speed
     end
+end
+
+-- =========================================================
+-- STRAFE FIX — реальный перехват штрафа скорости
+-- =========================================================
+-- Проблема: Roblox умножает WalkSpeed на "input scale":
+--   - вперёд = 1.0
+--   - назад = 0.7
+--   - вбок = 0.7
+-- Ни WalkSpeed, ни :Move() это НЕ перебивают в новой версии движка.
+--
+-- Решение: физически двигаем HumanoidRootPart через LinearVelocity
+-- в направлении движения с полной скоростью, независимо от ввода.
+
+local strafeAttachment = nil
+local strafeLinearVel = nil
+
+local function cleanupStrafePhysics()
+    if strafeLinearVel then
+        pcall(function() strafeLinearVel:Destroy() end)
+        strafeLinearVel = nil
+    end
+    if strafeAttachment then
+        pcall(function() strafeAttachment:Destroy() end)
+        strafeAttachment = nil
+    end
+end
+
+local function onStrafeFix()
+    if not BUNNY_HOP.Enabled then return end
+    if not BUNNY_HOP.StrafeFix then return end
+
+    local char = LocalPlayer.Character
+    if not char then cleanupStrafePhysics() return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then cleanupStrafePhysics() return end
+
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then cleanupStrafePhysics() return end
+
+    -- Держим WalkSpeed на всякий случай
+    if hum.WalkSpeed ~= BUNNY_HOP.Speed then
+        hum.WalkSpeed = BUNNY_HOP.Speed
+    end
+
+    -- Создаём Attachment + LinearVelocity, если их нет
+    if not strafeAttachment or not strafeAttachment.Parent then
+        cleanupStrafePhysics()
+        strafeAttachment = Instance.new("Attachment")
+        strafeAttachment.Name = "SlaughterStrafeAttach"
+        strafeAttachment.Parent = root
+
+        strafeLinearVel = Instance.new("LinearVelocity")
+        strafeLinearVel.Name = "SlaughterStrafeLV"
+        strafeLinearVel.Attachment0 = strafeAttachment
+        strafeLinearVel.MaxForce = math.huge
+        strafeLinearVel.VelocityConstraintMode = Enum.VelocityConstraintMode.Plane
+        strafeLinearVel.PlaneNormal = Vector3.new(0, 1, 0)
+        strafeLinearVel.PlaneVelocity = Vector2.new(0, 0)
+        strafeLinearVel.RelativeTo = Enum.ActuatorRelativeTo.World
+        strafeLinearVel.Parent = root
+    end
+
+    -- Направление движения из Humanoid
+    local md = hum.MoveDirection
+    local speed = BUNNY_HOP.Speed
+
+    -- Считаем целевую скорость: если игрок двигается — едем с полной speed
+    if md.Magnitude > 0.05 then
+        local targetVel = Vector3.new(md.X * speed, 0, md.Z * speed)
+        strafeLinearVel.PlaneVelocity = Vector2.new(targetVel.X, targetVel.Z)
+    else
+        strafeLinearVel.PlaneVelocity = Vector2.new(0, 0)
+    end
+end
+
+local function startStrafeFix()
+    if BUNNY_HOP.StrafeConnection then return end
+    BUNNY_HOP.StrafeConnection = RunService.RenderStepped:Connect(function()
+        pcall(onStrafeFix)
+    end)
+end
+
+local function stopStrafeFix()
+    if BUNNY_HOP.StrafeConnection then
+        BUNNY_HOP.StrafeConnection:Disconnect()
+        BUNNY_HOP.StrafeConnection = nil
+    end
+    cleanupStrafePhysics()
 end
 
 local function startBunnyHop()
@@ -1519,17 +1611,20 @@ local function stopBunnyHop()
     end
 end
 
+-- Главный тумблер Bunny Hop
 makeToggle(tabs["Misc"].Container, "Bunny Hop", false, function(v)
     BUNNY_HOP.Enabled = v
     if v then
         startBunnyHop()
+        if BUNNY_HOP.StrafeFix then startStrafeFix() end
         local char = LocalPlayer.Character
         if char then
             local hum = char:FindFirstChildOfClass("Humanoid")
-            if hum then hum.WalkSpeed = 49 end
+            if hum then hum.WalkSpeed = BUNNY_HOP.Speed end
         end
     else
         stopBunnyHop()
+        stopStrafeFix()
         local char = LocalPlayer.Character
         if char then
             local hum = char:FindFirstChildOfClass("Humanoid")
@@ -1538,14 +1633,40 @@ makeToggle(tabs["Misc"].Container, "Bunny Hop", false, function(v)
     end
 end)
 
+-- Под-окно "Bunny Hop Settings"
+local bunnySettings = makeCollapsible(tabs["Misc"].Container, "Bunny Hop Settings", false)
+
+makeSlider(bunnySettings, "Bunny Hop Speed", 1, 49, 49, function(v)
+    BUNNY_HOP.Speed = v
+    if BUNNY_HOP.Enabled then
+        local char = LocalPlayer.Character
+        if char then
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            if hum then hum.WalkSpeed = v end
+        end
+    end
+end)
+
+makeToggle(bunnySettings, "Strafe Fix", true, function(v)
+    BUNNY_HOP.StrafeFix = v
+    if BUNNY_HOP.Enabled then
+        if v then startStrafeFix() else stopStrafeFix() end
+    end
+end)
+
 -- При респавне — просто ждём и ставим скорость, ничего не сбрасываем
 LocalPlayer.CharacterAdded:Connect(function(char)
     if not BUNNY_HOP.Enabled then return end
     local hum = char:WaitForChild("Humanoid", 5)
     if hum then
-        hum.WalkSpeed = 49
+        hum.WalkSpeed = BUNNY_HOP.Speed
     end
-    -- Соединение Heartbeat НЕ трогаем — оно уже работает
+    -- Strafe Fix перезапускаем на новом персонаже + чистим старые Attachment
+    if BUNNY_HOP.StrafeFix then
+        stopStrafeFix()
+        task.wait(0.1)
+        startStrafeFix()
+    end
 end)
 
 -- =========================================================
@@ -1909,77 +2030,68 @@ end)
 -- ПОЛНЫЙ UNLOAD — убивает ВСЁ что связано со скриптом
 -- =========================================================
 local function unloadScript()
-    -- 1) Отключаем RenderStepped СРАЗУ, чтобы цикл не пересоздавал ESP
+    -- =========================================================
+    -- 1) Отключаем ВСЕ постоянные соединения
+    -- =========================================================
     if espConnection then
         pcall(function() espConnection:Disconnect() end)
         espConnection = nil
     end
-
-    -- 2) Убираем ВСЕ Highlight'ы, привязанные к скрипту — даже у мёртвых/удалённых моделей
-    pcall(function()
-        for _, obj in ipairs(workspace:GetDescendants()) do
-            if obj.Name == "SlaughterESP_HL" and obj:IsA("Highlight") then
-                obj:Destroy()
-            end
-            if obj.Name == "SlaughterESP_Box"
-            or obj.Name == "SlaughterESP_Name"
-            or obj.Name == "SlaughterESP_Dist"
-            or obj.Name == "SlaughterESP_Beam"
-            or obj.Name == "SlaughterTracer_A0"
-            or obj.Name == "SlaughterTracer_A1" then
-                obj:Destroy()
-            end
-        end
-    end)
-
-    -- 3) Чистим таблицу ESP (через копию ключей — БЕЗ модификации во время итерации)
-    local keys = {}
-    for model in pairs(ESP.Objects) do
-        table.insert(keys, model)
-    end
-    for _, model in ipairs(keys) do
-        pcall(function() detachESP(model) end)
-    end
-    ESP.Objects = {}
-
-    -- 4) Уничтожаем все GUI
-    for _, name in ipairs({"SlaughterGUI", "SlaughterIntro", "SlaughterNotifications", "SlaughterESPBoxes", "SlaughterFOVCircle"}) do
-        local g = CoreGui:FindFirstChild(name)
-        if g then g:Destroy() end
-        local pg = LocalPlayer:FindFirstChild("PlayerGui")
-        if pg then
-            local g2 = pg:FindFirstChild(name)
-            if g2 then g2:Destroy() end
-        end
-    end
-
-    -- 5) Отключаем все пользовательские Input-соединения (бинд K)
-    if inputConnection then
-        pcall(function() inputConnection:Disconnect() end)
-        inputConnection = nil
-    end
-
-    -- 5.1) Отключаем AIM соединение
     if aimConnection then
         pcall(function() aimConnection:Disconnect() end)
         aimConnection = nil
     end
+    if inputConnection then
+        pcall(function() inputConnection:Disconnect() end)
+        inputConnection = nil
+    end
+    if scrollConnection then
+        pcall(function() scrollConnection:Disconnect() end)
+        scrollConnection = nil
+    end
 
-    -- 5.2) Отключаем Bunny Hop
+    -- =========================================================
+    -- 2) Bunny Hop — стоп + скорость на дефолт + Strafe стоп
+    -- =========================================================
     if BUNNY_HOP then
         BUNNY_HOP.Enabled = false
         if BUNNY_HOP.Connection then
             pcall(function() BUNNY_HOP.Connection:Disconnect() end)
             BUNNY_HOP.Connection = nil
         end
-        local char = LocalPlayer.Character
-        if char then
-            local hum = char:FindFirstChildOfClass("Humanoid")
-            if hum then hum.WalkSpeed = 16 end
+        if BUNNY_HOP.StrafeConnection then
+            pcall(function() BUNNY_HOP.StrafeConnection:Disconnect() end)
+            BUNNY_HOP.StrafeConnection = nil
+        end
+        BUNNY_HOP.LastJump = 0
+    end
+
+    -- Чистим физику Strafe (LinearVelocity + Attachment)
+    pcall(function()
+        for _, obj in ipairs(workspace:GetDescendants()) do
+            if obj.Name == "SlaughterStrafeLV" and obj:IsA("LinearVelocity") then
+                obj:Destroy()
+            end
+            if obj.Name == "SlaughterStrafeAttach" and obj:IsA("Attachment") then
+                obj:Destroy()
+            end
+        end
+    end)
+
+    -- =========================================================
+    -- 3) Fast Alive — стоп + отмена таска
+    -- =========================================================
+    if FAST_ALIVE then
+        FAST_ALIVE.Enabled = false
+        if FAST_ALIVE.SpamTask then
+            pcall(function() task.cancel(FAST_ALIVE.SpamTask) end)
+            FAST_ALIVE.SpamTask = nil
         end
     end
 
-    -- 5.3) Отключаем Hitbox Expander + восстанавливаем головы
+    -- =========================================================
+    -- 4) Hitbox Expander — стоп + восстановить головы
+    -- =========================================================
     if HITBOX then
         HITBOX.Enabled = false
         if HITBOX.Connection then
@@ -2000,16 +2112,9 @@ local function unloadScript()
         end)
     end
 
-    -- 5.4) Отключаем Fast Alive
-    if FAST_ALIVE then
-        FAST_ALIVE.Enabled = false
-        if FAST_ALIVE.SpamTask then
-            pcall(function() task.cancel(FAST_ALIVE.SpamTask) end)
-            FAST_ALIVE.SpamTask = nil
-        end
-    end
-
-    -- 5.5) Отключаем Magnet
+    -- =========================================================
+    -- 5) Magnet — стоп
+    -- =========================================================
     if MAGNET then
         MAGNET.Enabled = false
         if MAGNET.Connection then
@@ -2018,24 +2123,93 @@ local function unloadScript()
         end
     end
 
-    -- 6) Очищаем ссылки
+    -- =========================================================
+    -- 6) Восстанавливаем скорость игрока на дефолт
+    -- =========================================================
+    pcall(function()
+        local char = LocalPlayer.Character
+        if char then
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            if hum then hum.WalkSpeed = 16 end
+        end
+    end)
+
+    -- =========================================================
+    -- 7) Удаляем ВСЕ объекты ESP из workspace
+    --    Highlight + BillboardGui (NameTag / DistTag)
+    -- =========================================================
+    pcall(function()
+        for _, obj in ipairs(workspace:GetDescendants()) do
+            if obj.Name == "SlaughterESP_HL" and obj:IsA("Highlight") then
+                obj.Adornee = nil
+                obj:Destroy()
+            end
+            if obj.Name == "SlaughterESP_Name" and obj:IsA("BillboardGui") then
+                obj.Adornee = nil
+                obj:Destroy()
+            end
+            if obj.Name == "SlaughterESP_Dist" and obj:IsA("BillboardGui") then
+                obj.Adornee = nil
+                obj:Destroy()
+            end
+        end
+    end)
+
+    -- =========================================================
+    -- 8) Чистим таблицу ESP
+    -- =========================================================
+    local keys = {}
+    for model in pairs(ESP.Objects) do
+        table.insert(keys, model)
+    end
+    for _, model in ipairs(keys) do
+        pcall(function() detachESP(model) end)
+    end
+    ESP.Objects = {}
+
+    -- =========================================================
+    -- 9) Уничтожаем ВСЕ ScreenGui скрипта (CoreGui + PlayerGui)
+    -- =========================================================
+    for _, name in ipairs({
+        "SlaughterGUI",
+        "SlaughterIntro",
+        "SlaughterNotifications",
+        "SlaughterESPBoxes",
+        "SlaughterFOVCircle",
+    }) do
+        local g = CoreGui:FindFirstChild(name)
+        if g then pcall(function() g:Destroy() end) end
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        if pg then
+            local g2 = pg:FindFirstChild(name)
+            if g2 then pcall(function() g2:Destroy() end) end
+        end
+    end
+
+    -- =========================================================
+    -- 10) Финальный скан workspace — на остатки по имени
+    -- =========================================================
+    pcall(function()
+        for _, obj in ipairs(workspace:GetDescendants()) do
+            local n = obj.Name
+            if n:sub(1, 12) == "SlaughterESP"
+                or n:sub(1, 14) == "SlaughterTracer"
+                or n == "SlaughterESP_HL" then
+                pcall(function() obj:Destroy() end)
+            end
+        end
+    end)
+
+    -- =========================================================
+    -- 11) Сбрасываем флаги ESP
+    -- =========================================================
     ESP.Enabled.Box = false
     ESP.Enabled.Tracer = false
     ESP.Enabled.Highlight = false
     ESP.Enabled.Name = false
     ESP.Enabled.Distance = false
 
-    -- 7) Финальный скан на всякий случай
-    pcall(function()
-        for _, obj in ipairs(workspace:GetDescendants()) do
-            if obj.Name:sub(1, 12) == "SlaughterESP"
-            or obj.Name:sub(1, 14) == "SlaughterTracer" then
-                obj:Destroy()
-            end
-        end
-    end)
-
-    print("[SLAUGHTER] Fully unloaded.")
+    print("[SLAUGHTER] Fully unloaded. All GUI and connections removed.")
 end
 
 local UnloadBtn = Instance.new("TextButton")
