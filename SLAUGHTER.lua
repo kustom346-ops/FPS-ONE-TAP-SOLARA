@@ -88,12 +88,12 @@ Title.Font = Enum.Font.GothamBold
 Title.TextXAlignment = Enum.TextXAlignment.Left
 Title.Parent = TopBar
 
--- Подпись "No Full Supported" рядом с SLAUGHTER
+-- Подпись версии рядом с SLAUGHTER
 local NoSupportLabel = Instance.new("TextLabel")
 NoSupportLabel.Size = UDim2.new(0, 160, 0, 20)
 NoSupportLabel.Position = UDim2.new(0, 135, 0.5, -10)
 NoSupportLabel.BackgroundTransparency = 1
-NoSupportLabel.Text = "No Full Supported"
+NoSupportLabel.Text = "Xeno Build 1.2"
 NoSupportLabel.TextColor3 = Color3.fromRGB(255, 140, 40)
 NoSupportLabel.TextSize = 11
 NoSupportLabel.Font = Enum.Font.GothamMedium
@@ -230,6 +230,114 @@ ContentTitle.Parent = Content
 
 local tabs = {}
 
+-- =========================================================
+-- УТИЛИТЫ: СКРОЛЛ КОЛЕСИКОМ + ПОД-ОКНА
+-- =========================================================
+
+-- Хранилище активного ScrollingFrame, которое слушает колесо
+local activeScrollFrame = nil
+
+-- Устанавливает, какой ScrollingFrame сейчас крутится колесом
+local function attachMouseWheelScroll(scrollingFrame)
+    activeScrollFrame = scrollingFrame
+end
+
+-- Глобальный слушатель колеса — крутит активный ScrollingFrame
+UserInputService.InputChanged:Connect(function(input, gameProcessed)
+    if input.UserInputType ~= Enum.UserInputType.MouseWheel then return end
+    if not ScreenGui.Enabled then return end
+
+    local frame = activeScrollFrame
+    if not frame or not frame.Parent then return end
+
+    local delta = -input.Position.Z * 50
+    local maxY = math.max(0, frame.AbsoluteCanvasSize.Y - frame.AbsoluteSize.Y)
+    local newY = math.clamp(frame.CanvasPosition.Y + delta, 0, maxY)
+    frame.CanvasPosition = Vector2.new(frame.CanvasPosition.X, newY)
+end)
+
+-- Создаёт раскрывающееся под-окно внутри родителя
+-- parent: куда положить (Container вкладки)
+-- title: надпись на кнопке-переключателе
+-- initialOpen: открыто ли сразу
+local function makeCollapsible(parent, title, initialOpen)
+    local wrapper = Instance.new("Frame")
+    wrapper.Size = UDim2.new(1, 0, 0, 36)
+    wrapper.BackgroundTransparency = 1
+    wrapper.Parent = parent
+    wrapper.AutomaticSize = Enum.AutomaticSize.Y
+    wrapper.ClipsDescendants = true
+
+    local wrapperLayout = Instance.new("UIListLayout")
+    wrapperLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    wrapperLayout.Padding = UDim.new(0, 6)
+    wrapperLayout.Parent = wrapper
+
+    local HeaderBtn = Instance.new("TextButton")
+    HeaderBtn.Size = UDim2.new(1, 0, 0, 36)
+    HeaderBtn.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+    HeaderBtn.BorderSizePixel = 0
+    HeaderBtn.Text = "▶  " .. title
+    HeaderBtn.TextColor3 = Color3.fromRGB(220, 220, 220)
+    HeaderBtn.TextSize = 13
+    HeaderBtn.Font = Enum.Font.GothamMedium
+    HeaderBtn.TextXAlignment = Enum.TextXAlignment.Left
+    HeaderBtn.Active = false
+    HeaderBtn.Parent = wrapper
+
+    local HBC = Instance.new("UICorner")
+    HBC.CornerRadius = UDim.new(0, 6)
+    HBC.Parent = HeaderBtn
+
+    local HBS = Instance.new("UIStroke")
+    HBS.Color = Color3.fromRGB(40, 40, 40)
+    HBS.Thickness = 1
+    HBS.Parent = HeaderBtn
+
+    local HBPad = Instance.new("UIPadding")
+    HBPad.PaddingLeft = UDim.new(0, 12)
+    HBPad.Parent = HeaderBtn
+
+    local Body = Instance.new("Frame")
+    Body.Size = UDim2.new(1, 0, 0, 0)
+    Body.BackgroundTransparency = 1
+    Body.Visible = initialOpen or false
+    Body.AutomaticSize = Enum.AutomaticSize.Y
+    Body.Parent = wrapper
+
+    local BodyLayout = Instance.new("UIListLayout")
+    BodyLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    BodyLayout.Padding = UDim.new(0, 6)
+    BodyLayout.Parent = Body
+
+    local BodyPad = Instance.new("UIPadding")
+    BodyPad.PaddingLeft = UDim.new(0, 8)
+    BodyPad.PaddingRight = UDim.new(0, 0)
+    BodyPad.Parent = Body
+
+    local isOpen = initialOpen or false
+
+    local function updateHeader()
+        HeaderBtn.Text = (isOpen and "▼  " or "▶  ") .. title
+    end
+    updateHeader()
+
+    HeaderBtn.MouseButton1Click:Connect(function()
+        isOpen = not isOpen
+        Body.Visible = isOpen
+        updateHeader()
+    end)
+
+    HeaderBtn.MouseEnter:Connect(function()
+        TweenService:Create(HeaderBtn, TweenInfo.new(0.15), {BackgroundColor3 = Color3.fromRGB(35, 35, 35)}):Play()
+    end)
+    HeaderBtn.MouseLeave:Connect(function()
+        TweenService:Create(HeaderBtn, TweenInfo.new(0.15), {BackgroundColor3 = Color3.fromRGB(25, 25, 25)}):Play()
+    end)
+
+    return Body
+end
+
 local function createTab(name, displayName)
     local TabButton = Instance.new("TextButton")
     TabButton.Size = UDim2.new(1, 0, 0, 32)
@@ -250,19 +358,34 @@ local function createTab(name, displayName)
     BtnPad.PaddingLeft = UDim.new(0, 10)
     BtnPad.Parent = TabButton
 
-    local TabContainer = Instance.new("Frame")
-    TabContainer.Size = UDim2.new(1, -10, 1, -35)  -- -10 для скроллбара
-    TabContainer.Position = UDim2.new(0, 0, 0, 35)
-    TabContainer.BackgroundTransparency = 1
-    TabContainer.Visible = false
-    TabContainer.Parent = Content
+    -- Свой ScrollingFrame на каждую вкладку
+    local TabScroll = Instance.new("ScrollingFrame")
+    TabScroll.Size = UDim2.new(1, 0, 1, -35)
+    TabScroll.Position = UDim2.new(0, 0, 0, 35)
+    TabScroll.BackgroundTransparency = 1
+    TabScroll.BorderSizePixel = 0
+    TabScroll.Visible = false
+    TabScroll.ScrollBarThickness = 4
+    TabScroll.ScrollBarImageColor3 = Color3.fromRGB(255, 140, 40)
+    TabScroll.ScrollBarImageTransparency = 0.3
+    TabScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    TabScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    TabScroll.ScrollingDirection = Enum.ScrollingDirection.Y
+    TabScroll.Active = true
+    TabScroll.Parent = Content
 
-    local ContainerLayout = Instance.new("UIListLayout")
-    ContainerLayout.SortOrder = Enum.SortOrder.LayoutOrder
-    ContainerLayout.Padding = UDim.new(0, 8)
-    ContainerLayout.Parent = TabContainer
+    local TabScrollPad = Instance.new("UIPadding")
+    TabScrollPad.PaddingTop = UDim.new(0, 4)
+    TabScrollPad.PaddingBottom = UDim.new(0, 8)
+    TabScrollPad.PaddingRight = UDim.new(0, 4)
+    TabScrollPad.Parent = TabScroll
 
-    tabs[name] = { Button = TabButton, Container = TabContainer, Layout = ContainerLayout }
+    local TabScrollLayout = Instance.new("UIListLayout")
+    TabScrollLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    TabScrollLayout.Padding = UDim.new(0, 8)
+    TabScrollLayout.Parent = TabScroll
+
+    tabs[name] = { Button = TabButton, Container = TabScroll, Layout = TabScrollLayout }
 
     TabButton.MouseButton1Click:Connect(function()
         for _, tab in pairs(tabs) do
@@ -276,21 +399,27 @@ local function createTab(name, displayName)
             BackgroundColor3 = Color3.fromRGB(35, 35, 35),
             TextColor3 = Color3.fromRGB(255, 255, 255)
         }):Play()
-        TabContainer.Visible = true
+        TabScroll.Visible = true
         ContentTitle.Text = displayName or name
+
+        -- Назначаем эту вкладку для скролла колесом
+        attachMouseWheelScroll(TabScroll)
     end)
 
     return tabs[name]
 end
 
-createTab("RAGE", "RAGE")
+createTab("COMBAT", "COMBAT")
 createTab("ESP", "ESP")
 createTab("Misc", "Misc")
 createTab("Settings", "Settings")
 
-tabs["RAGE"].Button.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
-tabs["RAGE"].Button.TextColor3 = Color3.fromRGB(255, 255, 255)
-tabs["RAGE"].Container.Visible = true
+tabs["COMBAT"].Button.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+tabs["COMBAT"].Button.TextColor3 = Color3.fromRGB(255, 255, 255)
+tabs["COMBAT"].Container.Visible = true
+
+-- Активируем скролл колесом для стартовой вкладки COMBAT
+attachMouseWheelScroll(tabs["COMBAT"].Container)
 
 -- =========================================================
 -- ХЕЛПЕР: Toggle
@@ -351,6 +480,7 @@ local function makeToggle(parent, labelText, default, callback)
     Btn.Size = UDim2.new(1, 0, 1, 0)
     Btn.BackgroundTransparency = 1
     Btn.Text = ""
+    Btn.Active = false
     Btn.Parent = Frame
 
     local function updateVisual()
@@ -466,6 +596,7 @@ local function makeSlider(parent, labelText, minVal, maxVal, default, callback)
     ClickArea.Size = UDim2.new(1, 0, 1, 0)
     ClickArea.BackgroundTransparency = 1
     ClickArea.Text = ""
+    ClickArea.Active = false
     ClickArea.Parent = TrackBg
 
     local dragging = false
@@ -525,6 +656,7 @@ local AIM = {
     FOV = 150,
     TargetPart = "Head",
     TeamCheck = false,
+    PredictionEnabled = false,
 }
 
 -- Отдельный ScreenGui для круга FOV
@@ -643,7 +775,52 @@ local function getAimTarget()
     return bestTarget, bestPart
 end
 
--- Основной цикл AIMBOT
+-- =========================================================
+-- AIMBOT: SMOOTH AIM + AUTO FIRE (v2)
+-- =========================================================
+
+-- Дополнительные настройки AIM
+AIM.Smoothness = 0.35      -- 0 = мгновенно, 1 = не двигается
+AIM.Prediction = 0.12      -- предсказание движения цели (сек)
+AIM.AutoFireDelay = 0.05   -- задержка между выстрелами
+AIM.VisibleColor = false   -- красить цель в красный когда видно
+
+-- Хранилище скорости цели для prediction
+local targetVelocityCache = {}
+
+-- Предсказание позиции цели (учёт движения) — только если тумблер включён
+local function predictPosition(part, velocity, ping)
+    if not part or not velocity then return part.Position end
+    if not AIM.PredictionEnabled then return part.Position end
+    return part.Position + velocity * (AIM.Prediction + ping)
+end
+
+-- Получаем пинг игрока (если есть)
+local function getPing()
+    local ok, ping = pcall(function()
+        return game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValue() / 1000
+    end)
+    return ok and ping or 0
+end
+
+-- Автофайр через mousemoverel (работает в большинстве игр без античита)
+local autoFireLast = 0
+local function doAutoFire()
+    local now = tick()
+    if now - autoFireLast < AIM.AutoFireDelay then return end
+    autoFireLast = now
+
+    pcall(function()
+        local VirtualInputManager = game:GetService("VirtualInputManager")
+        VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 1)
+        task.defer(function()
+            task.wait(0.01)
+            VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 1)
+        end)
+    end)
+end
+
+-- Основной цикл AIMBOT (RenderStepped для максимальной отзывчивости)
 aimConnection = RunService.RenderStepped:Connect(function(dt)
     if not AIM.Enabled then return end
 
@@ -651,27 +828,78 @@ aimConnection = RunService.RenderStepped:Connect(function(dt)
     if not target or not part then return end
 
     local camera = workspace.CurrentCamera
-    camera.CFrame = CFrame.new(camera.CFrame.Position, part.Position)
+
+    -- Считаем скорость цели для prediction
+    local rootPart = target:FindFirstChild("HumanoidRootPart") or target.PrimaryPart
+    local velocity = Vector3.zero
+    if rootPart then
+        local cached = targetVelocityCache[target]
+        if cached and cached.lastPos then
+            velocity = (rootPart.Position - cached.lastPos) / math.max(dt, 0.001)
+        end
+        targetVelocityCache[target] = { lastPos = rootPart.Position }
+    end
+
+    -- Предсказанная позиция
+    local aimPos = predictPosition(part, velocity, getPing())
+
+    -- Smooth lerp
+    local targetCF = CFrame.new(camera.CFrame.Position, aimPos)
+    if AIM.Smoothness <= 0.01 then
+        camera.CFrame = targetCF
+    else
+        -- Нормализуем smoothness: 0 = мгновенно, 1 = почти не двигается
+        local alpha = math.clamp(1 - AIM.Smoothness, 0.05, 1)
+        camera.CFrame = camera.CFrame:Lerp(targetCF, alpha)
+    end
 
     if AIM.AutoFire then
-        pcall(function()
-            local VirtualInputManager = game:GetService("VirtualInputManager")
-            VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 1)
-            task.wait(0.01)
-            VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 1)
-        end)
+        doAutoFire()
     end
 end)
 
--- UI тумблеров во вкладке RAGE
-makeToggle(tabs["RAGE"].Container, "Aimbot", false, function(v) AIM.Enabled = v end)
-makeToggle(tabs["RAGE"].Container, "Visible Check", false, function(v) AIM.VisibleCheck = v end)
-makeToggle(tabs["RAGE"].Container, "Auto Fire", false, function(v) AIM.AutoFire = v end)
-makeToggle(tabs["RAGE"].Container, "Draw FOV", false, function(v)
+-- Очистка кэша скорости
+task.spawn(function()
+    while aimConnection do
+        task.wait(5)
+        for model in pairs(targetVelocityCache) do
+            if not model.Parent then
+                targetVelocityCache[model] = nil
+            end
+        end
+    end
+end)
+
+-- =========================================================
+-- RAGE: Aimbot главный тумблер + под-окно настроек
+-- =========================================================
+
+-- Главный тумблер Aimbot
+makeToggle(tabs["COMBAT"].Container, "Aimbot", false, function(v) AIM.Enabled = v end)
+
+-- Под-окно "Aimbot Settings"
+local aimSettings = makeCollapsible(tabs["COMBAT"].Container, "Aimbot Settings", false)
+
+makeToggle(aimSettings, "Visible Check", false, function(v) AIM.VisibleCheck = v end)
+makeToggle(aimSettings, "Auto Fire", false, function(v) AIM.AutoFire = v end)
+makeSlider(aimSettings, "Smoothness", 0, 95, 35, function(v)
+    AIM.Smoothness = v / 100
+end)
+
+-- Тумблер Prediction + ползунок под ним
+makeToggle(aimSettings, "Prediction", false, function(v)
+    AIM.PredictionEnabled = v
+end)
+makeSlider(aimSettings, "Prediction Amount", 0, 50, 12, function(v)
+    AIM.Prediction = v / 100
+end)
+
+-- Draw FOV тумблер (сам по себе) + ползунок FOV Radius под ним
+makeToggle(tabs["COMBAT"].Container, "Draw FOV", false, function(v)
     AIM.DrawFOV = v
     updateFOVCircle()
 end)
-makeSlider(tabs["RAGE"].Container, "FOV Radius", 30, 600, 150, function(v)
+makeSlider(tabs["COMBAT"].Container, "FOV Radius", 30, 600, 150, function(v)
     AIM.FOV = v
     updateFOVCircle()
 end)
@@ -704,6 +932,33 @@ local ESP = {
 }
 
 local ESP_COLOR = Color3.fromRGB(255, 140, 40)
+
+-- Трассер (линия от низа экрана к цели)
+local function createTracer()
+    local frame = Instance.new("Frame")
+    frame.Name = "SlaughterESP_Tracer"
+    frame.BackgroundColor3 = ESP_COLOR
+    frame.BorderSizePixel = 0
+    frame.AnchorPoint = Vector2.new(0.5, 0.5)
+    frame.ZIndex = 4
+    frame.Visible = false
+    frame.Parent = ESPBoxGui
+    return frame
+end
+
+-- Highlight (обводка модели сквозь стены)
+local function createHighlight(model)
+    local hl = Instance.new("Highlight")
+    hl.Name = "SlaughterESP_HL"
+    hl.Adornee = model
+    hl.FillColor = ESP_COLOR
+    hl.OutlineColor = Color3.fromRGB(255, 255, 255)
+    hl.FillTransparency = 0.6
+    hl.OutlineTransparency = 0
+    hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    hl.Parent = ESPBoxGui  -- держим в ScreenGui, а не в модели
+    return hl
+end
 
 -- Создаёт красивый 2D-бокс (ScreenGui) — точно по хитбоксу модели
 local function createBoxScreen()
@@ -842,18 +1097,30 @@ local function detachESP(model)
     if not data then return end
 
     -- Удаляем всё с pcall, даже если Parent уже nil
-    if data.Box then pcall(function() data.Box:Destroy() end) end
+    if data.Box then
+        pcall(function()
+            data.Box.Visible = false
+            data.Box:Destroy()
+        end)
+    end
+    if data.Tracer then
+        pcall(function()
+            data.Tracer.Visible = false
+            data.Tracer:Destroy()
+        end)
+    end
     if data.NameTag then pcall(function() data.NameTag:Destroy() end) end
     if data.DistTag then pcall(function() data.DistTag:Destroy() end) end
-    if data.Highlight then pcall(function() data.Highlight:Destroy() end) end
 
-    if data.Tracer then
-        if data.Tracer.beam then pcall(function() data.Tracer.beam:Destroy() end) end
-        if data.Tracer.a0 then pcall(function() data.Tracer.a0:Destroy() end) end
-        if data.Tracer.a1 then pcall(function() data.Tracer.a1:Destroy() end) end
+    -- Highlight лежит в ESPBoxGui — сбрасываем Adornee и удаляем
+    if data.Highlight then
+        pcall(function()
+            data.Highlight.Adornee = nil
+            data.Highlight:Destroy()
+        end)
     end
 
-    -- Дополнительная страховка: ищем Highlight прямо в модели
+    -- Дополнительная страховка: если Highlight остался в модели (старый формат) — чистим
     if model and model.Parent then
         local hl = model:FindFirstChild("SlaughterESP_HL")
         if hl then hl:Destroy() end
@@ -940,7 +1207,8 @@ espConnection = RunService.RenderStepped:Connect(function()
         if not ESP.Objects[t.model] then attachESP(t.model) end
         local data = ESP.Objects[t.model]
         if data then
-            -- BOX (2D, через позиции частей модели — работает и для игроков, и для ботов)
+
+            -- ===================== BOX =====================
             if ESP.Enabled.Box then
                 if not data.Box or not data.Box.Parent then
                     data.Box = createBoxScreen()
@@ -948,93 +1216,80 @@ espConnection = RunService.RenderStepped:Connect(function()
 
                 local box = data.Box
                 if box and box.Parent then
+                    -- Если цель мертва — прячем бокс сразу
+                    if t.hum and t.hum.Health <= 0 then
+                        box.Visible = false
+                    else
                     local camera = workspace.CurrentCamera
-                    local myChar = LocalPlayer.Character
-                    local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
-                    local myPos = myRoot and myRoot.Position
 
-                    -- Считаем min/max X, Y по ВСЕМ BasePart модели на экране
-                    local minX, minY = math.huge, math.huge
-                    local maxX, maxY = -math.huge, -math.huge
-                    local anyVisible = false
+                    local ok, cf, size = pcall(function()
+                        return t.model:GetBoundingBox()
+                    end)
 
-                    for _, part in ipairs(t.model:GetDescendants()) do
-                        if part:IsA("BasePart") and part.Transparency < 1 then
-                            -- Пропускаем дальние части (за стенкой) — примерно
-                            local worldPos = part.Position
-                            local screenPos, onScreen = camera:WorldToViewportPoint(worldPos)
+                    if ok and cf and size then
+                        local corners = {
+                            cf * Vector3.new( size.X/2,  size.Y/2,  size.Z/2),
+                            cf * Vector3.new(-size.X/2,  size.Y/2,  size.Z/2),
+                            cf * Vector3.new( size.X/2, -size.Y/2,  size.Z/2),
+                            cf * Vector3.new(-size.X/2, -size.Y/2,  size.Z/2),
+                            cf * Vector3.new( size.X/2,  size.Y/2, -size.Z/2),
+                            cf * Vector3.new(-size.X/2,  size.Y/2, -size.Z/2),
+                            cf * Vector3.new( size.X/2, -size.Y/2, -size.Z/2),
+                            cf * Vector3.new(-size.X/2, -size.Y/2, -size.Z/2),
+                        }
 
-                            if onScreen and screenPos.Z > 0 and screenPos.Z < 1000 then
-                                -- БЕЗ Raycast — видим сквозь стены (как в нормальных ESP)
-                                local halfSize = part.Size / 2
-                                -- Проецируем 8 углов части на экран
-                                for _, offset in ipairs({
-                                    Vector3.new(halfSize.X, halfSize.Y, halfSize.Z),
-                                    Vector3.new(-halfSize.X, halfSize.Y, halfSize.Z),
-                                    Vector3.new(halfSize.X, -halfSize.Y, halfSize.Z),
-                                    Vector3.new(-halfSize.X, -halfSize.Y, halfSize.Z),
-                                    Vector3.new(halfSize.X, halfSize.Y, -halfSize.Z),
-                                    Vector3.new(-halfSize.X, halfSize.Y, -halfSize.Z),
-                                    Vector3.new(halfSize.X, -halfSize.Y, -halfSize.Z),
-                                    Vector3.new(-halfSize.X, -halfSize.Y, -halfSize.Z),
-                                }) do
-                                    local cornerWorld = worldPos + offset
-                                    local cornerScreen, cornerOnScreen = camera:WorldToViewportPoint(cornerWorld)
-                                    if cornerOnScreen and cornerScreen.Z > 0 then
-                                        if cornerScreen.X < minX then minX = cornerScreen.X end
-                                        if cornerScreen.X > maxX then maxX = cornerScreen.X end
-                                        if cornerScreen.Y < minY then minY = cornerScreen.Y end
-                                        if cornerScreen.Y > maxY then maxY = cornerScreen.Y end
-                                        anyVisible = true
-                                    end
-                                end
+                        local minX, minY = math.huge, math.huge
+                        local maxX, maxY = -math.huge, -math.huge
+                        local anyVisible = false
+
+                        for _, worldPos in ipairs(corners) do
+                            local sp, onScreen = camera:WorldToViewportPoint(worldPos)
+                            if onScreen and sp.Z > 0 then
+                                if sp.X < minX then minX = sp.X end
+                                if sp.X > maxX then maxX = sp.X end
+                                if sp.Y < minY then minY = sp.Y end
+                                if sp.Y > maxY then maxY = sp.Y end
+                                anyVisible = true
                             end
                         end
-                    end
 
-                    if anyVisible and minX < math.huge then
-                        local width = maxX - minX
-                        local height = maxY - minY
+                        if anyVisible and minX < math.huge then
+                            local width = maxX - minX
+                            local height = maxY - minY
 
-                        -- Добавляем отступы
-                        local padX = 1
-                        local padY = 1
-                        minX = minX - padX
-                        minY = minY - padY
-                        width = width + padX * 2
-                        height = height + padY * 2
+                            box.Visible = true
+                            box.Position = UDim2.new(0, minX - 1, 0, minY - 1)
+                            box.Size = UDim2.new(0, width + 2, 0, height + 2)
 
-                        box.Visible = true
-                        box.Position = UDim2.new(0, minX, 0, minY)
-                        box.Size = UDim2.new(0, width, 0, height)
+                            local thickness = 1
+                            local cornerLen = 8
 
-                        -- Обновляем 4 линии и 4 уголка
-                        local thickness = 1
-                        local cornerLen = 8
+                            box.Top.Position = UDim2.new(0, 0, 0, 0)
+                            box.Top.Size = UDim2.new(1, 0, 0, thickness)
 
-                        box.Top.Position = UDim2.new(0, 0, 0, 0)
-                        box.Top.Size = UDim2.new(1, 0, 0, thickness)
+                            box.Bottom.Position = UDim2.new(0, 0, 1, -thickness)
+                            box.Bottom.Size = UDim2.new(1, 0, 0, thickness)
 
-                        box.Bottom.Position = UDim2.new(0, 0, 1, -thickness)
-                        box.Bottom.Size = UDim2.new(1, 0, 0, thickness)
+                            box.Left.Position = UDim2.new(0, 0, 0, 0)
+                            box.Left.Size = UDim2.new(0, thickness, 1, 0)
 
-                        box.Left.Position = UDim2.new(0, 0, 0, 0)
-                        box.Left.Size = UDim2.new(0, thickness, 1, 0)
+                            box.Right.Position = UDim2.new(1, -thickness, 0, 0)
+                            box.Right.Size = UDim2.new(0, thickness, 1, 0)
 
-                        box.Right.Position = UDim2.new(1, -thickness, 0, 0)
-                        box.Right.Size = UDim2.new(0, thickness, 1, 0)
-
-                        -- Уголки (белые — для красоты)
-                        box.TL.Position = UDim2.new(0, 0, 0, 0)
-                        box.TL.Size = UDim2.new(0, cornerLen, 0, thickness)
-                        box.TR.Position = UDim2.new(1, -cornerLen, 0, 0)
-                        box.TR.Size = UDim2.new(0, cornerLen, 0, thickness)
-                        box.BL.Position = UDim2.new(0, 0, 1, -thickness)
-                        box.BL.Size = UDim2.new(0, cornerLen, 0, thickness)
-                        box.BR.Position = UDim2.new(1, -cornerLen, 1, -thickness)
-                        box.BR.Size = UDim2.new(0, cornerLen, 0, thickness)
+                            box.TL.Position = UDim2.new(0, 0, 0, 0)
+                            box.TL.Size = UDim2.new(0, cornerLen, 0, thickness)
+                            box.TR.Position = UDim2.new(1, -cornerLen, 0, 0)
+                            box.TR.Size = UDim2.new(0, cornerLen, 0, thickness)
+                            box.BL.Position = UDim2.new(0, 0, 1, -thickness)
+                            box.BL.Size = UDim2.new(0, cornerLen, 0, thickness)
+                            box.BR.Position = UDim2.new(1, -cornerLen, 1, -thickness)
+                            box.BR.Size = UDim2.new(0, cornerLen, 0, thickness)
+                        else
+                            box.Visible = false
+                        end
                     else
                         box.Visible = false
+                    end
                     end
                 end
             else
@@ -1044,7 +1299,73 @@ espConnection = RunService.RenderStepped:Connect(function()
                 end
             end
 
-            -- NAME
+            -- ===================== TRACER =====================
+            if ESP.Enabled.Tracer then
+                if not data.Tracer or not data.Tracer.Parent then
+                    data.Tracer = createTracer()
+                end
+                local tracer = data.Tracer
+                if tracer and tracer.Parent then
+                    local camera = workspace.CurrentCamera
+                    local rootPart = t.root
+                    if rootPart then
+                        local sp, onScreen = camera:WorldToViewportPoint(rootPart.Position)
+                        if onScreen and sp.Z > 0 then
+                            local screenBottom = Vector2.new(camera.ViewportSize.X / 2, camera.ViewportSize.Y)
+                            local screenTarget = Vector2.new(sp.X, sp.Y)
+                            local delta = screenTarget - screenBottom
+                            local length = delta.Magnitude
+                            local angle = math.deg(math.atan2(delta.Y, delta.X))
+
+                            tracer.Visible = true
+                            tracer.Position = UDim2.new(0, (screenBottom.X + screenTarget.X) / 2, 0, (screenBottom.Y + screenTarget.Y) / 2)
+                            tracer.Size = UDim2.new(0, length, 0, 1)
+                            tracer.Rotation = angle
+                        else
+                            tracer.Visible = false
+                        end
+                    end
+                end
+            else
+                if data.Tracer and data.Tracer.Parent then
+                    data.Tracer:Destroy()
+                    data.Tracer = nil
+                end
+            end
+
+            -- ===================== HIGHLIGHT =====================
+            if ESP.Enabled.Highlight then
+                -- Highlight надо пересоздать, если:
+                -- 1) его нет
+                -- 2) он удалён
+                -- 3) Adornee мёртв или не совпадает с текущей моделью
+                local needNew = false
+                if not data.Highlight or not data.Highlight.Parent then
+                    needNew = true
+                elseif not data.Highlight.Adornee or data.Highlight.Adornee ~= t.model then
+                    needNew = true
+                end
+
+                if needNew then
+                    if data.Highlight then
+                        pcall(function()
+                            data.Highlight.Adornee = nil
+                            data.Highlight:Destroy()
+                        end)
+                    end
+                    data.Highlight = createHighlight(t.model)
+                end
+            else
+                if data.Highlight then
+                    pcall(function()
+                        data.Highlight.Adornee = nil
+                        data.Highlight:Destroy()
+                    end)
+                    data.Highlight = nil
+                end
+            end
+
+            -- ===================== NAME =====================
             if ESP.Enabled.Name then
                 if not data.NameTag or not data.NameTag.Parent then
                     data.NameTag, data.NameText = createNameTag(t.model)
@@ -1059,7 +1380,7 @@ espConnection = RunService.RenderStepped:Connect(function()
                 end
             end
 
-            -- DISTANCE
+            -- ===================== DISTANCE =====================
             if ESP.Enabled.Distance then
                 if not data.DistTag or not data.DistTag.Parent then
                     data.DistTag, data.DistText = createDistanceTag(t.model)
@@ -1081,15 +1402,68 @@ espConnection = RunService.RenderStepped:Connect(function()
         end
     end
 
-    for model, _ in pairs(ESP.Objects) do
+    -- Безопасная чистка моделей
+    local toRemove = {}
+    for model in pairs(ESP.Objects) do
         if not alive[model] or not model.Parent then
-            detachESP(model)
+            table.insert(toRemove, model)
+        end
+    end
+    for _, model in ipairs(toRemove) do
+        detachESP(model)
+    end
+
+    -- ЖЁСТКАЯ чистка осиротевших боксов в ESPBoxGui
+    -- Если бокс не принадлежит ни одной живой модели — прячем и удаляем
+    local activeBoxes = {}
+    for _, t in ipairs(targets) do
+        local d = ESP.Objects[t.model]
+        if d and d.Box then
+            activeBoxes[d.Box] = true
+        end
+    end
+    for _, child in ipairs(ESPBoxGui:GetChildren()) do
+        if child.Name == "SlaughterESP_Box" and not activeBoxes[child] then
+            child.Visible = false
+            child:Destroy()
+        end
+    end
+
+    -- То же для трассеров
+    local activeTracers = {}
+    for _, t in ipairs(targets) do
+        local d = ESP.Objects[t.model]
+        if d and d.Tracer then
+            activeTracers[d.Tracer] = true
+        end
+    end
+    for _, child in ipairs(ESPBoxGui:GetChildren()) do
+        if child.Name == "SlaughterESP_Tracer" and not activeTracers[child] then
+            child.Visible = false
+            child:Destroy()
+        end
+    end
+
+    -- ЖЁСТКАЯ чистка осиротевших Highlight'ов
+    local activeHLs = {}
+    for _, t in ipairs(targets) do
+        local d = ESP.Objects[t.model]
+        if d and d.Highlight then
+            activeHLs[d.Highlight] = true
+        end
+    end
+    for _, child in ipairs(ESPBoxGui:GetChildren()) do
+        if child.Name == "SlaughterESP_HL" and not activeHLs[child] then
+            child.Adornee = nil
+            child:Destroy()
         end
     end
 end)
 
 -- UI кнопок ESP
 makeToggle(tabs["ESP"].Container, "Box", false, function(v) ESP.Enabled.Box = v end)
+makeToggle(tabs["ESP"].Container, "Tracer", false, function(v) ESP.Enabled.Tracer = v end)
+makeToggle(tabs["ESP"].Container, "Highlight", false, function(v) ESP.Enabled.Highlight = v end)
 makeToggle(tabs["ESP"].Container, "Name", false, function(v) ESP.Enabled.Name = v end)
 makeToggle(tabs["ESP"].Container, "Distance", false, function(v) ESP.Enabled.Distance = v end)
 
@@ -1377,22 +1751,32 @@ makeSlider(tabs["Misc"].Container, "Hitbox Size", 5, 100, 30, function(v)
 end)
 
 -- =========================================================
--- MISC: MAGNET — телепортирует ВСЕХ врагов к прицелу + автофаер
+-- MISC: MAGNET v2 — телепорт врагов + автофаер + режимы
 -- =========================================================
 
 local MAGNET = {
     Enabled = false,
     Connection = nil,
+    AutoFire = false,
+    Mode = "Aim",
+    Offset = 3,
 }
 
--- Точка прицела: 5 студов перед камерой
+local magnetFireLast = 0
+
 local function getAimPoint()
     local camera = workspace.CurrentCamera
     if not camera then return nil end
-    return camera.CFrame.Position + camera.CFrame.LookVector * 5
+    return camera.CFrame.Position + camera.CFrame.LookVector * MAGNET.Offset
 end
 
--- Телепорт модели в точку
+local function getPlayerPoint()
+    local char = LocalPlayer.Character
+    if not char then return nil end
+    local root = char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart
+    return root and root.Position or nil
+end
+
 local function teleportModel(model, targetPos)
     if not model or not model.Parent then return end
     local myChar = LocalPlayer.Character
@@ -1403,13 +1787,14 @@ local function teleportModel(model, targetPos)
 
     for _, part in ipairs(model:GetDescendants()) do
         if part:IsA("BasePart") then
-            part.CanCollide = false
-            part.CFrame = CFrame.new(targetPos)
+            pcall(function()
+                part.CanCollide = false
+                part.CFrame = CFrame.new(targetPos)
+            end)
         end
     end
 end
 
--- Сбор всех врагов (игроки + боты)
 local function getAllEnemies()
     local enemies = {}
     local myChar = LocalPlayer.Character
@@ -1440,21 +1825,41 @@ local function getAllEnemies()
     return enemies
 end
 
--- Основной цикл Magnet — каждый кадр телепорт + автофаер
+local function magnetAutoFire()
+    if not MAGNET.AutoFire then return end
+    local now = tick()
+    if now - magnetFireLast < 0.05 then return end
+    magnetFireLast = now
+
+    pcall(function()
+        local VirtualInputManager = game:GetService("VirtualInputManager")
+        VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 1)
+        task.defer(function()
+            task.wait(0.01)
+            VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 1)
+        end)
+    end)
+end
+
 local function startMagnet()
     if MAGNET.Connection then return end
 
-    MAGNET.Connection = RunService.RenderStepped:Connect(function()
+    MAGNET.Connection = RunService.Heartbeat:Connect(function()
         if not MAGNET.Enabled then return end
 
-        local aimPoint = getAimPoint()
-        if not aimPoint then return end
+        local target
+        if MAGNET.Mode == "Player" then
+            target = getPlayerPoint()
+        else
+            target = getAimPoint()
+        end
+        if not target then return end
 
-        -- Телепортируем всех врагов в точку прицела
         for _, enemy in ipairs(getAllEnemies()) do
-            pcall(teleportModel, enemy, aimPoint)
+            pcall(teleportModel, enemy, target)
         end
 
+        magnetAutoFire()
     end)
 end
 
@@ -1465,14 +1870,25 @@ local function stopMagnet()
     end
 end
 
--- ЕДИНСТВЕННЫЙ ТУМБЛЕР — никаких настроек
+-- Главный тумблер Magnet
 makeToggle(tabs["Misc"].Container, "Magnet", false, function(v)
     MAGNET.Enabled = v
-    if v then
-        startMagnet()
-    else
-        stopMagnet()
-    end
+    if v then startMagnet() else stopMagnet() end
+end)
+
+-- Под-окно "Magnet Mode"
+local magnetSettings = makeCollapsible(tabs["Misc"].Container, "Magnet Mode", false)
+
+makeToggle(magnetSettings, "Auto Fire", false, function(v)
+    MAGNET.AutoFire = v
+end)
+
+makeToggle(magnetSettings, "Mode: to Me", false, function(v)
+    MAGNET.Mode = v and "Player" or "Aim"
+end)
+
+makeSlider(magnetSettings, "Magnet Offset", 1, 15, 3, function(v)
+    MAGNET.Offset = v
 end)
 
 -- =========================================================
@@ -2024,13 +2440,13 @@ end
 -- =========================================================
 -- СТАРТ
 -- =========================================================
-notify("SLAUGHTER", "Executor loaded successfully", 2, Color3.fromRGB(80, 255, 120))
+notify("SLAUGHTER", "Xeno Executor loaded", 2, Color3.fromRGB(80, 255, 120))
 task.wait(0.4)
 notify("SLAUGHTER", "Injecting interface...", 2, Color3.fromRGB(255, 200, 50))
 task.wait(0.3)
-notify("SLAUGHTER", "A weak Executor is used; there is no full support.", 3, Color3.fromRGB(255, 140, 40))
+notify("SLAUGHTER", "Xeno Build 1.2 — full support enabled", 3, Color3.fromRGB(255, 140, 40))
 task.wait(0.6)
 
 runIntro()
 
-print("[SLAUGHTER] GUI успешно загружен! Bинд на K — открыть/закрыть GUI.")
+print("[SLAUGHTER] Xeno Build 1.2 загружен! Бинд на K — открыть/закрыть GUI.")
