@@ -10,6 +10,7 @@ local LocalPlayer = Players.LocalPlayer
 local espConnection = nil
 local inputConnection = nil
 local aimConnection = nil
+local INTRO_CONNECTION = nil
 
 -- Bunny Hop переменные
 local BUNNY_HOP = {
@@ -93,7 +94,7 @@ local NoSupportLabel = Instance.new("TextLabel")
 NoSupportLabel.Size = UDim2.new(0, 160, 0, 20)
 NoSupportLabel.Position = UDim2.new(0, 135, 0.5, -10)
 NoSupportLabel.BackgroundTransparency = 1
-NoSupportLabel.Text = "Xeno Build 1.2"
+NoSupportLabel.Text = "2.0"
 NoSupportLabel.TextColor3 = Color3.fromRGB(255, 140, 40)
 NoSupportLabel.TextSize = 11
 NoSupportLabel.Font = Enum.Font.GothamMedium
@@ -412,6 +413,7 @@ end
 createTab("COMBAT", "COMBAT")
 createTab("ESP", "ESP")
 createTab("Misc", "Misc")
+createTab("Places", "Places")
 createTab("Settings", "Settings")
 
 tabs["COMBAT"].Button.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
@@ -1670,6 +1672,146 @@ LocalPlayer.CharacterAdded:Connect(function(char)
 end)
 
 -- =========================================================
+-- PLACES: TELEPORT SAFE ZONE + BACK
+-- =========================================================
+
+local PLACES = {
+    SavedPosition = nil,
+    SafeZonePart = nil,
+}
+
+-- Создаёт квадрат-зону впереди игрока
+local function createSafeZone(position)
+    -- Удаляем старую зону
+    if PLACES.SafeZonePart and PLACES.SafeZonePart.Parent then
+        pcall(function() PLACES.SafeZonePart:Destroy() end)
+    end
+
+    local part = Instance.new("Part")
+    part.Name = "SlaughterSafeZone"
+    part.Size = Vector3.new(15, 4, 15)  -- толстая плита 4 студа
+    part.Position = position
+    part.Anchored = true
+    part.CanCollide = true
+    part.Material = Enum.Material.Neon
+    part.Color = Color3.fromRGB(80, 255, 120)
+    part.Transparency = 0.5
+    part.Parent = workspace
+
+    PLACES.SafeZonePart = part
+    return part
+end
+
+-- Кнопка TELEPORT TO SAFE ZONE
+local safeZoneBtn = Instance.new("TextButton")
+safeZoneBtn.Size = UDim2.new(1, 0, 0, 40)
+safeZoneBtn.BackgroundColor3 = Color3.fromRGB(20, 60, 30)
+safeZoneBtn.BorderSizePixel = 0
+safeZoneBtn.Text = "TELEPORT TO SAFE ZONE"
+safeZoneBtn.TextColor3 = Color3.fromRGB(120, 255, 150)
+safeZoneBtn.TextSize = 13
+safeZoneBtn.Font = Enum.Font.GothamBold
+safeZoneBtn.Parent = tabs["Places"].Container
+
+local SZCorner = Instance.new("UICorner")
+SZCorner.CornerRadius = UDim.new(0, 6)
+SZCorner.Parent = safeZoneBtn
+
+local SZStroke = Instance.new("UIStroke")
+SZStroke.Color = Color3.fromRGB(40, 120, 60)
+SZStroke.Thickness = 1
+SZStroke.Parent = safeZoneBtn
+
+safeZoneBtn.MouseEnter:Connect(function()
+    TweenService:Create(safeZoneBtn, TweenInfo.new(0.15), {BackgroundColor3 = Color3.fromRGB(80, 255, 120), TextColor3 = Color3.fromRGB(0, 0, 0)}):Play()
+    TweenService:Create(SZStroke, TweenInfo.new(0.15), {Color = Color3.fromRGB(80, 255, 120)}):Play()
+end)
+safeZoneBtn.MouseLeave:Connect(function()
+    TweenService:Create(safeZoneBtn, TweenInfo.new(0.15), {BackgroundColor3 = Color3.fromRGB(20, 60, 30), TextColor3 = Color3.fromRGB(120, 255, 150)}):Play()
+    TweenService:Create(SZStroke, TweenInfo.new(0.15), {Color = Color3.fromRGB(40, 120, 60)}):Play()
+end)
+
+safeZoneBtn.MouseButton1Click:Connect(function()
+    local char = LocalPlayer.Character
+    if not char then return end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+
+    -- Сохраняем текущую позицию (для Back)
+    PLACES.SavedPosition = root.CFrame
+
+    -- Телепорт ровно на 100 студов вниз от текущей позиции
+    local currentPos = root.Position
+    local targetPos = currentPos + Vector3.new(0, -100, 0)
+
+    -- Создаём зону на целевой точке
+    createSafeZone(targetPos)
+
+    -- Телепорт
+    root.CFrame = CFrame.new(targetPos)
+end)
+
+-- Кнопка BACK
+local backBtn = Instance.new("TextButton")
+backBtn.Size = UDim2.new(1, 0, 0, 40)
+backBtn.BackgroundColor3 = Color3.fromRGB(60, 40, 10)
+backBtn.BorderSizePixel = 0
+backBtn.Text = "BACK TO PREVIOUS POSITION"
+backBtn.TextColor3 = Color3.fromRGB(255, 200, 100)
+backBtn.TextSize = 13
+backBtn.Font = Enum.Font.GothamBold
+backBtn.Parent = tabs["Places"].Container
+
+local BBCorner = Instance.new("UICorner")
+BBCorner.CornerRadius = UDim.new(0, 6)
+BBCorner.Parent = backBtn
+
+local BBStroke = Instance.new("UIStroke")
+BBStroke.Color = Color3.fromRGB(120, 80, 20)
+BBStroke.Thickness = 1
+BBStroke.Parent = backBtn
+
+backBtn.MouseEnter:Connect(function()
+    TweenService:Create(backBtn, TweenInfo.new(0.15), {BackgroundColor3 = Color3.fromRGB(255, 200, 100), TextColor3 = Color3.fromRGB(0, 0, 0)}):Play()
+    TweenService:Create(BBStroke, TweenInfo.new(0.15), {Color = Color3.fromRGB(255, 200, 100)}):Play()
+end)
+backBtn.MouseLeave:Connect(function()
+    TweenService:Create(backBtn, TweenInfo.new(0.15), {BackgroundColor3 = Color3.fromRGB(60, 40, 10), TextColor3 = Color3.fromRGB(255, 200, 100)}):Play()
+    TweenService:Create(BBStroke, TweenInfo.new(0.15), {Color = Color3.fromRGB(120, 80, 20)}):Play()
+end)
+
+backBtn.MouseButton1Click:Connect(function()
+    if not PLACES.SavedPosition then return end
+    local char = LocalPlayer.Character
+    if not char then return end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+
+    root.CFrame = PLACES.SavedPosition
+
+    -- Убираем зону
+    if PLACES.SafeZonePart and PLACES.SafeZonePart.Parent then
+        pcall(function() PLACES.SafeZonePart:Destroy() end)
+        PLACES.SafeZonePart = nil
+    end
+end)
+
+-- Инфо-надпись
+local placesInfo = Instance.new("TextLabel")
+placesInfo.Size = UDim2.new(1, 0, 0, 30)
+placesInfo.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+placesInfo.BorderSizePixel = 0
+placesInfo.Text = "Zone created 20 studs in front of you"
+placesInfo.TextColor3 = Color3.fromRGB(150, 150, 150)
+placesInfo.TextSize = 11
+placesInfo.Font = Enum.Font.Gotham
+placesInfo.Parent = tabs["Places"].Container
+
+local PICorner = Instance.new("UICorner")
+PICorner.CornerRadius = UDim.new(0, 6)
+PICorner.Parent = placesInfo
+
+-- =========================================================
 -- MISC: FAST ALIVE — авто-клик по кнопке "ВОЗРОЖДЕНИЕ"
 -- =========================================================
 
@@ -1872,6 +2014,168 @@ makeSlider(tabs["Misc"].Container, "Hitbox Size", 5, 100, 30, function(v)
 end)
 
 -- =========================================================
+-- MISC: NOCLIP — проход сквозь стены
+-- =========================================================
+
+local NOCLIP = {
+    Enabled = false,
+    Connection = nil,
+}
+
+local function startNoclip()
+    if NOCLIP.Connection then return end
+    NOCLIP.Connection = RunService.Stepped:Connect(function()
+        if not NOCLIP.Enabled then return end
+        local char = LocalPlayer.Character
+        if not char then return end
+        for _, part in ipairs(char:GetDescendants()) do
+            if part:IsA("BasePart") and part.CanCollide then
+                part.CanCollide = false
+            end
+        end
+    end)
+end
+
+local function stopNoclip()
+    if NOCLIP.Connection then
+        NOCLIP.Connection:Disconnect()
+        NOCLIP.Connection = nil
+    end
+    -- Возвращаем коллизию
+    local char = LocalPlayer.Character
+    if char then
+        for _, part in ipairs(char:GetDescendants()) do
+            if part:IsA("BasePart") then
+                pcall(function()
+                    if part.Name == "HumanoidRootPart" or part.Name == "Torso" or part.Name == "UpperTorso" or part.Name == "LowerTorso" then
+                        part.CanCollide = true
+                    elseif part.Name:find("Leg") or part.Name:find("Foot") or part.Name:find("Arm") or part.Name:find("Hand") then
+                        part.CanCollide = false
+                    end
+                end)
+            end
+        end
+    end
+end
+
+makeToggle(tabs["Misc"].Container, "Noclip", false, function(v)
+    NOCLIP.Enabled = v
+    if v then
+        startNoclip()
+    else
+        stopNoclip()
+    end
+end)
+
+-- =========================================================
+-- MISC: FLY — полёт
+-- =========================================================
+
+local FLY = {
+    Enabled = false,
+    Connection = nil,
+    Speed = 50,
+    Velocity = nil,
+    Gyro = nil,
+    Attachment = nil,
+}
+
+local function startFly()
+    if FLY.Connection then return end
+
+    local char = LocalPlayer.Character
+    if not char then return end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+
+    -- Убираем старые
+    if FLY.Velocity then pcall(function() FLY.Velocity:Destroy() end) end
+    if FLY.Gyro then pcall(function() FLY.Gyro:Destroy() end) end
+    if FLY.Attachment then pcall(function() FLY.Attachment:Destroy() end) end
+
+    -- Attachment
+    FLY.Attachment = Instance.new("Attachment")
+    FLY.Attachment.Name = "SlaughterFlyAttach"
+    FLY.Attachment.Parent = root
+
+    -- LinearVelocity — двигает по вектору
+    FLY.Velocity = Instance.new("LinearVelocity")
+    FLY.Velocity.Name = "SlaughterFlyVelocity"
+    FLY.Velocity.Attachment0 = FLY.Attachment
+    FLY.Velocity.MaxForce = math.huge
+    FLY.Velocity.VelocityConstraintMode = Enum.VelocityConstraintMode.Vector
+    FLY.Velocity.RelativeTo = Enum.ActuatorRelativeTo.World
+    FLY.Velocity.VectorVelocity = Vector3.zero
+    FLY.Velocity.Parent = root
+
+    -- Сбрасываем гравитацию для root
+    pcall(function()
+        local bv = Instance.new("BodyForce")
+        bv.Name = "SlaughterFlyAntiGrav"
+        bv.Force = Vector3.new(0, workspace.Gravity * root:GetMass(), 0)
+        bv.Parent = root
+    end)
+
+    FLY.Connection = RunService.RenderStepped:Connect(function()
+        if not FLY.Enabled then return end
+        local c = LocalPlayer.Character
+        if not c then return end
+        local r = c:FindFirstChild("HumanoidRootPart")
+        if not r then return end
+        local cam = workspace.CurrentCamera
+
+        -- Направление движения
+        local moveDir = Vector3.zero
+        if UserInputService:IsKeyDown(Enum.KeyCode.W) then moveDir = moveDir + cam.CFrame.LookVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.S) then moveDir = moveDir - cam.CFrame.LookVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.A) then moveDir = moveDir - cam.CFrame.RightVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.D) then moveDir = moveDir + cam.CFrame.RightVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.Space) then moveDir = moveDir + Vector3.new(0, 1, 0) end
+        if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then moveDir = moveDir - Vector3.new(0, 1, 0) end
+
+        if moveDir.Magnitude > 0 then
+            moveDir = moveDir.Unit * FLY.Speed
+        end
+
+        FLY.Velocity.VectorVelocity = moveDir
+    end)
+end
+
+local function stopFly()
+    if FLY.Connection then
+        FLY.Connection:Disconnect()
+        FLY.Connection = nil
+    end
+    if FLY.Velocity then pcall(function() FLY.Velocity:Destroy() end); FLY.Velocity = nil end
+    if FLY.Gyro then pcall(function() FLY.Gyro:Destroy() end); FLY.Gyro = nil end
+    if FLY.Attachment then pcall(function() FLY.Attachment:Destroy() end); FLY.Attachment = nil end
+    -- Убираем AntiGrav
+    local char = LocalPlayer.Character
+    if char then
+        local root = char:FindFirstChild("HumanoidRootPart")
+        if root then
+            local ag = root:FindFirstChild("SlaughterFlyAntiGrav")
+            if ag then pcall(function() ag:Destroy() end) end
+        end
+    end
+end
+
+makeToggle(tabs["Misc"].Container, "Fly", false, function(v)
+    FLY.Enabled = v
+    if v then
+        startFly()
+    else
+        stopFly()
+    end
+end)
+
+-- Под-окно "Fly Settings"
+local flySettings = makeCollapsible(tabs["Misc"].Container, "Fly Settings", false)
+makeSlider(flySettings, "Fly Speed", 10, 300, 50, function(v)
+    FLY.Speed = v
+end)
+
+-- =========================================================
 -- MISC: MAGNET v2 — телепорт врагов + автофаер + режимы
 -- =========================================================
 
@@ -1881,6 +2185,8 @@ local MAGNET = {
     AutoFire = false,
     Mode = "Aim",
     Offset = 3,
+    TargetBots = true,      -- телепорт ботов
+    TargetPlayers = true,   -- телепорт живых игроков
 }
 
 local magnetFireLast = 0
@@ -1916,10 +2222,9 @@ local function teleportModel(model, targetPos)
     end
 end
 
-local function getAllEnemies()
+local function getPlayerEnemies()
     local enemies = {}
     local myChar = LocalPlayer.Character
-
     for _, plr in ipairs(Players:GetPlayers()) do
         if plr ~= LocalPlayer and plr.Character and plr.Character ~= myChar then
             local hum = plr.Character:FindFirstChildOfClass("Humanoid")
@@ -1928,13 +2233,20 @@ local function getAllEnemies()
             end
         end
     end
+    return enemies
+end
 
+local function getBotEnemies()
+    local enemies = {}
+    local myChar = LocalPlayer.Character
     local function scan(container)
         for _, obj in ipairs(container:GetChildren()) do
-            if obj:IsA("Model") and obj ~= myChar and not Players:GetPlayerFromCharacter(obj) then
-                local hum = obj:FindFirstChildOfClass("Humanoid")
-                if hum and hum.Health > 0 then
-                    table.insert(enemies, obj)
+            if obj:IsA("Model") and obj ~= myChar then
+                if not Players:GetPlayerFromCharacter(obj) then
+                    local hum = obj:FindFirstChildOfClass("Humanoid")
+                    if hum and hum.Health > 0 then
+                        table.insert(enemies, obj)
+                    end
                 end
             elseif obj:IsA("Folder") or (obj:IsA("Model") and not obj:FindFirstChildOfClass("Humanoid")) then
                 scan(obj)
@@ -1942,7 +2254,21 @@ local function getAllEnemies()
         end
     end
     scan(workspace)
+    return enemies
+end
 
+local function getAllEnemies()
+    local enemies = {}
+    if MAGNET.TargetPlayers then
+        for _, e in ipairs(getPlayerEnemies()) do
+            table.insert(enemies, e)
+        end
+    end
+    if MAGNET.TargetBots then
+        for _, e in ipairs(getBotEnemies()) do
+            table.insert(enemies, e)
+        end
+    end
     return enemies
 end
 
@@ -2012,6 +2338,15 @@ makeSlider(magnetSettings, "Magnet Offset", 1, 15, 3, function(v)
     MAGNET.Offset = v
 end)
 
+-- Цели телепорта
+makeToggle(magnetSettings, "Target Bots", true, function(v)
+    MAGNET.TargetBots = v
+end)
+
+makeToggle(magnetSettings, "Target Players", true, function(v)
+    MAGNET.TargetPlayers = v
+end)
+
 -- =========================================================
 -- KEYBIND: K — открыть/закрыть GUI
 -- =========================================================
@@ -2048,6 +2383,10 @@ local function unloadScript()
     if scrollConnection then
         pcall(function() scrollConnection:Disconnect() end)
         scrollConnection = nil
+    end
+    if INTRO_CONNECTION then
+        pcall(function() INTRO_CONNECTION:Disconnect() end)
+        INTRO_CONNECTION = nil
     end
 
     -- =========================================================
@@ -2124,6 +2463,52 @@ local function unloadScript()
     end
 
     -- =========================================================
+    -- 5.1) Noclip — стоп
+    -- =========================================================
+    if NOCLIP then
+        NOCLIP.Enabled = false
+        if NOCLIP.Connection then
+            pcall(function() NOCLIP.Connection:Disconnect() end)
+            NOCLIP.Connection = nil
+        end
+    end
+
+    -- =========================================================
+    -- 5.2) Fly — стоп
+    -- =========================================================
+    if FLY then
+        FLY.Enabled = false
+        if FLY.Connection then
+            pcall(function() FLY.Connection:Disconnect() end)
+            FLY.Connection = nil
+        end
+        if FLY.Velocity then pcall(function() FLY.Velocity:Destroy() end) end
+        if FLY.Gyro then pcall(function() FLY.Gyro:Destroy() end) end
+        if FLY.Attachment then pcall(function() FLY.Attachment:Destroy() end) end
+        FLY.Velocity = nil
+        FLY.Gyro = nil
+        FLY.Attachment = nil
+    end
+
+    -- =========================================================
+    -- 5.3) Places — чистим SafeZone
+    -- =========================================================
+    if PLACES and PLACES.SafeZonePart and PLACES.SafeZonePart.Parent then
+        pcall(function() PLACES.SafeZonePart:Destroy() end)
+        PLACES.SafeZonePart = nil
+    end
+
+    -- Чистим всё Fly-связанное из workspace
+    pcall(function()
+        for _, obj in ipairs(workspace:GetDescendants()) do
+            if obj.Name == "SlaughterFlyVelocity" and obj:IsA("LinearVelocity") then obj:Destroy() end
+            if obj.Name == "SlaughterFlyAttach" and obj:IsA("Attachment") then obj:Destroy() end
+            if obj.Name == "SlaughterFlyAntiGrav" and obj:IsA("BodyForce") then obj:Destroy() end
+            if obj.Name == "SlaughterSafeZone" and obj:IsA("Part") then obj:Destroy() end
+        end
+    end)
+
+    -- =========================================================
     -- 6) Восстанавливаем скорость игрока на дефолт
     -- =========================================================
     pcall(function()
@@ -2194,7 +2579,10 @@ local function unloadScript()
             local n = obj.Name
             if n:sub(1, 12) == "SlaughterESP"
                 or n:sub(1, 14) == "SlaughterTracer"
-                or n == "SlaughterESP_HL" then
+                or n == "SlaughterESP_HL"
+                or n:sub(1, 14) == "SlaughterFly"
+                or n:sub(1, 16) == "SlaughterStrafe"
+                or n == "SlaughterSafeZone" then
                 pcall(function() obj:Destroy() end)
             end
         end
@@ -2562,6 +2950,7 @@ local function runIntro()
 
     local conn
     conn = RunService.Heartbeat:Connect(function(dt)
+        INTRO_CONNECTION = conn
         elapsed = elapsed + dt
         local progress = math.clamp(elapsed / totalDuration, 0, 1)
 
@@ -2614,13 +3003,13 @@ end
 -- =========================================================
 -- СТАРТ
 -- =========================================================
-notify("SLAUGHTER", "Xeno Executor loaded", 2, Color3.fromRGB(80, 255, 120))
+notify("SLAUGHTER", "Xeno Full Supported", 2, Color3.fromRGB(80, 255, 120))
 task.wait(0.4)
 notify("SLAUGHTER", "Injecting interface...", 2, Color3.fromRGB(255, 200, 50))
 task.wait(0.3)
-notify("SLAUGHTER", "Xeno Build 1.2 — full support enabled", 3, Color3.fromRGB(255, 140, 40))
+notify("SLAUGHTER", "2.0 — full support enabled", 3, Color3.fromRGB(255, 140, 40))
 task.wait(0.6)
 
 runIntro()
 
-print("[SLAUGHTER] Xeno Build 1.2 загружен! Бинд на K — открыть/закрыть GUI.")
+print("[SLAUGHTER] 2.0 загружен! Бинд на K — открыть/закрыть GUI.")
