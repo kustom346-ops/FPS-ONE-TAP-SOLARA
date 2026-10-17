@@ -40,10 +40,19 @@ Main.Position = UDim2.new(0.5, -270, 0.5, -210)
 Main.BackgroundColor3 = Color3.fromRGB(12, 12, 14)
 Main.BorderSizePixel = 0
 Main.Active = true
-Main.Draggable = true
+-- Draggable отключён — используем кастомный drag с clamp ниже
 Main.BackgroundTransparency = 1
 Main.ClipsDescendants = false
 Main.Parent = ScreenGui
+
+-- Кастомный drag с clamp — вешаем ТОЛЬКО на TopBar, чтобы клики по кнопкам не тащили окно
+-- (TopBar создаётся ниже, поэтому drag подключим после его создания)
+local MAIN_DRAG = {
+    dragging = false,
+    dragStart = nil,
+    startPos = nil,
+    connChanged = nil,
+}
 
 local MainCorner = Instance.new("UICorner")
 MainCorner.CornerRadius = UDim.new(0, 14)
@@ -82,16 +91,35 @@ TopBar.BorderSizePixel = 0
 TopBar.BackgroundTransparency = 1
 TopBar.Parent = Main
 
+-- Drag только за TopBar — кнопки внутри не тащат окно
+TopBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        MAIN_DRAG.dragging = true
+        MAIN_DRAG.dragStart = input.Position
+        MAIN_DRAG.startPos = Main.Position
+    end
+end)
+
+TopBar.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        MAIN_DRAG.dragging = false
+    end
+end)
+
+MAIN_DRAG.connChanged = UserInputService.InputChanged:Connect(function(input)
+    if not MAIN_DRAG.dragging then return end
+    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+        local delta = input.Position - MAIN_DRAG.dragStart
+        local vp = workspace.CurrentCamera.ViewportSize
+        local newX = math.clamp(MAIN_DRAG.startPos.X.Offset + delta.X, -Main.AbsoluteSize.X + 60, vp.X - 60)
+        local newY = math.clamp(MAIN_DRAG.startPos.Y.Offset + delta.Y, 0, vp.Y - 40)
+        Main.Position = UDim2.new(0, newX, 0, newY)
+    end
+end)
+
 local TopBarCorner = Instance.new("UICorner")
 TopBarCorner.CornerRadius = UDim.new(0, 14)
 TopBarCorner.Parent = TopBar
-
-local TopBarFix = Instance.new("Frame")
-TopBarFix.Size = UDim2.new(1, 0, 0, 15)
-TopBarFix.Position = UDim2.new(0, 0, 1, -15)
-TopBarFix.BackgroundColor3 = Color3.fromRGB(10, 10, 12)
-TopBarFix.BorderSizePixel = 0
-TopBarFix.Parent = TopBar
 
 local TopBarGradient = Instance.new("UIGradient")
 TopBarGradient.Color = ColorSequence.new{
@@ -471,24 +499,27 @@ MHFPS.Font = Enum.Font.GothamMedium
 MHFPS.TextXAlignment = Enum.TextXAlignment.Left
 MHFPS.Parent = MiniHud
 
--- Обновление FPS и Ping
-task.spawn(function()
-    local frames = 0
+-- ===== Обновление FPS и Ping =====
+-- Соединения хранятся в переменных, чтобы отключать их в unloadScript
+local fpsFrameConnection = nil
+local fpsLoopTask = nil
+
+fpsFrameConnection = RunService.RenderStepped:Connect(function()
+    MINI_HUD_FPS_FRAMES = (MINI_HUD_FPS_FRAMES or 0) + 1
+end)
+
+fpsLoopTask = task.spawn(function()
     local lastTime = tick()
     local fps = 60
-
-    RunService.RenderStepped:Connect(function()
-        frames = frames + 1
-    end)
 
     while MiniHud.Parent do
         task.wait(0.5)
         local now = tick()
         local elapsed = now - lastTime
         if elapsed > 0 then
-            fps = math.floor(frames / elapsed + 0.5)
+            fps = math.floor((MINI_HUD_FPS_FRAMES or 0) / elapsed + 0.5)
         end
-        frames = 0
+        MINI_HUD_FPS_FRAMES = 0
         lastTime = now
 
         MHFPS.Text = "FPS " .. fps
@@ -999,7 +1030,12 @@ local function makeToggle(parent, labelText, default, callback)
     end)
 
     return {
-        Set = function(v) state = v; updateVisual(); if callback then pcall(callback, state) end end,
+        Set = function(v)
+            state = v
+            lastClick = 0   -- сброс cooldown, чтобы клики после Set не глотались
+            updateVisual()
+            if callback then pcall(callback, state) end
+        end,
         Get = function() return state end
     }
 end
@@ -1217,7 +1253,8 @@ local AIM = {
     FOV = 150,
     TargetPart = "Head",
     TeamCheck = false,
-    PredictionEnabled = false,
+    TargetPlayers = true,
+    TargetBots = true,
 }
 
 -- Отдельный ScreenGui для круга FOV
@@ -1277,6 +1314,56 @@ local function isVisible(targetPart, myChar)
     return result == nil
 end
 
+-- Кэш целей для аимбота
+local AIM_TARGET_CACHE = {}
+local AIM_CACHE_TIME = 0
+local AIM_CACHE_INTERVAL = 0.15
+
+local function collectAimTargets()
+    local myChar = LocalPlayer.Character
+    if not myChar then return {} end
+
+    local potentialTargets = {}
+    local seen = {}
+    local wantPlayers = AIM.TargetPlayers
+    local wantBots    = AIM.TargetBots
+
+    if wantPlayers then
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer and plr.Character and plr.Character ~= myChar then
+                if not AIM.TeamCheck or (plr.Team ~= LocalPlayer.Team) then
+                    potentialTargets[plr.Character] = true
+                    seen[plr.Character] = true
+                end
+            end
+        end
+    end
+
+    if wantBots then
+        local function scan(container)
+            for _, obj in ipairs(container:GetChildren()) do
+                if obj:IsA("Model") and obj ~= myChar and not seen[obj] then
+                    if not Players:GetPlayerFromCharacter(obj) then
+                        if obj:FindFirstChildOfClass("Humanoid") then
+                            potentialTargets[obj] = true
+                            seen[obj] = true
+                        end
+                    end
+                elseif obj:IsA("Folder") or (obj:IsA("Model") and not obj:FindFirstChildOfClass("Humanoid")) then
+                    scan(obj)
+                end
+            end
+        end
+        scan(workspace)
+    end
+
+    local list = {}
+    for model in pairs(potentialTargets) do
+        table.insert(list, model)
+    end
+    return list
+end
+
 -- Получить ближайшую к прицелу цель
 local function getAimTarget()
     local camera = workspace.CurrentCamera
@@ -1284,48 +1371,34 @@ local function getAimTarget()
     local myChar = LocalPlayer.Character
     if not myChar then return nil end
 
+    local now = tick()
+    if now - AIM_CACHE_TIME > AIM_CACHE_INTERVAL or #AIM_TARGET_CACHE == 0 then
+        AIM_TARGET_CACHE = collectAimTargets()
+        AIM_CACHE_TIME = now
+    end
+
     local bestTarget, bestPart, bestDist = nil, nil, AIM.FOV
-    local potentialTargets = {}
 
-    for _, plr in ipairs(Players:GetPlayers()) do
-        if plr ~= LocalPlayer and plr.Character and plr.Character ~= myChar then
-            if not AIM.TeamCheck or (plr.Team ~= LocalPlayer.Team) then
-                table.insert(potentialTargets, plr.Character)
-            end
-        end
-    end
+    for _, model in ipairs(AIM_TARGET_CACHE) do
+        if model and model.Parent then
+            local hum = model:FindFirstChildOfClass("Humanoid")
+            if hum and hum.Health > 0 then
+                local part = model:FindFirstChild(AIM.TargetPart)
+                    or model:FindFirstChild("HumanoidRootPart")
+                    or model:FindFirstChild("UpperTorso")
+                    or model:FindFirstChild("Torso")
+                    or model:FindFirstChild("Head")
 
-    local function scan(container)
-        for _, obj in ipairs(container:GetChildren()) do
-            if obj:IsA("Model") and obj ~= myChar and not Players:GetPlayerFromCharacter(obj) then
-                if obj:FindFirstChildOfClass("Humanoid") then
-                    table.insert(potentialTargets, obj)
-                end
-            elseif obj:IsA("Folder") or (obj:IsA("Model") and not obj:FindFirstChildOfClass("Humanoid")) then
-                scan(obj)
-            end
-        end
-    end
-    scan(workspace)
-
-    for _, model in ipairs(potentialTargets) do
-        local hum = model:FindFirstChildOfClass("Humanoid")
-        if hum and hum.Health > 0 then
-            local part = model:FindFirstChild(AIM.TargetPart)
-                or model:FindFirstChild("HumanoidRootPart")
-                or model:FindFirstChild("UpperTorso")
-                or model:FindFirstChild("Torso")
-                or model:FindFirstChild("Head")
-
-            if part then
-                local screenPos, onScreen = camera:WorldToViewportPoint(part.Position)
-                if onScreen and screenPos.Z > 0 then
-                    local dist = (Vector2.new(screenPos.X, screenPos.Y) - screenCenter).Magnitude
-                    if dist < bestDist then
-                        if not AIM.VisibleCheck or isVisible(part, myChar) then
-                            bestDist = dist
-                            bestTarget = model
-                            bestPart = part
+                if part then
+                    local screenPos, onScreen = camera:WorldToViewportPoint(part.Position)
+                    if onScreen and screenPos.Z > 0 then
+                        local dist = (Vector2.new(screenPos.X, screenPos.Y) - screenCenter).Magnitude
+                        if dist < bestDist then
+                            if not AIM.VisibleCheck or isVisible(part, myChar) then
+                                bestDist = dist
+                                bestTarget = model
+                                bestPart = part
+                            end
                         end
                     end
                 end
@@ -1342,19 +1415,8 @@ end
 
 -- Дополнительные настройки AIM
 AIM.Smoothness = 0.35      -- 0 = мгновенно, 1 = не двигается
-AIM.Prediction = 0.12      -- предсказание движения цели (сек)
 AIM.AutoFireDelay = 0.05   -- задержка между выстрелами
 AIM.VisibleColor = false   -- красить цель в красный когда видно
-
--- Хранилище скорости цели для prediction
-local targetVelocityCache = {}
-
--- Предсказание позиции цели (учёт движения) — только если тумблер включён
-local function predictPosition(part, velocity, ping)
-    if not part or not velocity then return part.Position end
-    if not AIM.PredictionEnabled then return part.Position end
-    return part.Position + velocity * (AIM.Prediction + ping)
-end
 
 -- Получаем пинг игрока (если есть)
 local function getPing()
@@ -1364,13 +1426,31 @@ local function getPing()
     return ok and ping or 0
 end
 
--- Автофайр через mousemoverel (работает в большинстве игр без античита)
+-- Автофайр: сначала пробуем executor-функции (mouse1click / mouse1press),
+-- потом fallback на VirtualInputManager.
 local autoFireLast = 0
 local function doAutoFire()
     local now = tick()
     if now - autoFireLast < AIM.AutoFireDelay then return end
     autoFireLast = now
 
+    -- 1) executor-функция mouse1click (лучший вариант)
+    local ok = pcall(function()
+        mouse1click()
+    end)
+    if ok then return end
+
+    -- 2) mouse1press / mouse1release
+    local ok2 = pcall(function()
+        mouse1press()
+        task.defer(function()
+            task.wait(0.01)
+            mouse1release()
+        end)
+    end)
+    if ok2 then return end
+
+    -- 3) fallback VirtualInputManager
     pcall(function()
         local VirtualInputManager = game:GetService("VirtualInputManager")
         VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 1)
@@ -1381,53 +1461,50 @@ local function doAutoFire()
     end)
 end
 
--- Основной цикл AIMBOT (RenderStepped для максимальной отзывчивости)
+-- Основной цикл AIMBOT
+-- Камера НЕ переводится в Scriptable — движение не морозится.
+-- Каждый кадр подмешиваем ТОЛЬКО поворот (позицию берём из текущей камеры),
+-- и только когда цель в FOV. Когда цели нет — камера полностью у игрока.
+local aimLastTargetPos = nil
+local aimLastTargetTime = 0
+
 aimConnection = RunService.RenderStepped:Connect(function(dt)
-    if not AIM.Enabled then return end
-
-    local target, part = getAimTarget()
-    if not target or not part then return end
-
     local camera = workspace.CurrentCamera
+    if not camera then return end
 
-    -- Считаем скорость цели для prediction
-    local rootPart = target:FindFirstChild("HumanoidRootPart") or target.PrimaryPart
-    local velocity = Vector3.zero
-    if rootPart then
-        local cached = targetVelocityCache[target]
-        if cached and cached.lastPos then
-            velocity = (rootPart.Position - cached.lastPos) / math.max(dt, 0.001)
-        end
-        targetVelocityCache[target] = { lastPos = rootPart.Position }
+    if not AIM.Enabled then
+        aimLastTargetPos = nil
+        aimLastTargetTime = 0
+        return
     end
 
-    -- Предсказанная позиция
-    local aimPos = predictPosition(part, velocity, getPing())
+    local target, part = getAimTarget()
+    if not target or not part then
+        -- Нет цели в FOV — вообще не трогаем камеру, игрок двигается свободно
+        aimLastTargetPos = nil
+        aimLastTargetTime = 0
+        return
+    end
 
-    -- Smooth lerp
-    local targetCF = CFrame.new(camera.CFrame.Position, aimPos)
+    -- ===== Точка прицела =====
+    local aimPos = part.Position
+
+    -- ===== Подмешиваем ТОЛЬКО поворот =====
+    -- Камера остаётся Custom → MoveDirection работает → движение не морозится.
+    local camPos = camera.CFrame.Position
+    local targetCF = CFrame.new(camPos, aimPos)
+
     if AIM.Smoothness <= 0.01 then
         camera.CFrame = targetCF
     else
-        -- Нормализуем smoothness: 0 = мгновенно, 1 = почти не двигается
         local alpha = math.clamp(1 - AIM.Smoothness, 0.05, 1)
+        alpha = alpha * alpha
+        -- CFrame:Lerp сохраняет позицию (обе CFrame имеют одинаковую позицию camPos)
         camera.CFrame = camera.CFrame:Lerp(targetCF, alpha)
     end
 
     if AIM.AutoFire then
         doAutoFire()
-    end
-end)
-
--- Очистка кэша скорости
-task.spawn(function()
-    while aimConnection do
-        task.wait(5)
-        for model in pairs(targetVelocityCache) do
-            if not model.Parent then
-                targetVelocityCache[model] = nil
-            end
-        end
     end
 end)
 
@@ -1447,12 +1524,234 @@ makeSlider(aimSettings, "Smoothness", 0, 95, 35, function(v)
     AIM.Smoothness = v / 100
 end)
 
--- Тумблер Prediction + ползунок под ним
-makeToggle(aimSettings, "Prediction", false, function(v)
-    AIM.PredictionEnabled = v
+-- Под-окно "Target Settings" (Aimbot)
+local aimTargetSettings = makeCollapsible(tabs["COMBAT"].Container, "Target Settings", false)
+
+makeToggle(aimTargetSettings, "Players", AIM.TargetPlayers, function(v)
+    AIM.TargetPlayers = v
 end)
-makeSlider(aimSettings, "Prediction Amount", 0, 50, 12, function(v)
-    AIM.Prediction = v / 100
+makeToggle(aimTargetSettings, "Bots", AIM.TargetBots, function(v)
+    AIM.TargetBots = v
+end)
+
+-- =========================================================
+-- MAGIC BULLET — телепорт всех целей в центр экрана + невидимость
+-- =========================================================
+local MAGIC = {
+    Enabled = false,
+    Connection = nil,
+    Offset = 5,
+    Interval = 50,
+    TargetPlayers = true,
+    TargetBots = true,
+    SavedStates = {},
+    LastTeleport = 0,
+}
+
+local function saveMagicState(model)
+    if MAGIC.SavedStates[model] then return end
+    local saved = { rootCFrame = nil, parts = {} }
+
+    local root = model:FindFirstChild("HumanoidRootPart")
+    if root then
+        saved.rootCFrame = root.CFrame
+    end
+
+    for _, part in ipairs(model:GetDescendants()) do
+        if part:IsA("BasePart") then
+            saved.parts[part] = {
+                anchored = part.Anchored,
+                cancollide = part.CanCollide,
+                localTrans = part.LocalTransparencyModifier,
+                size = part.Size,
+            }
+        end
+    end
+
+    MAGIC.SavedStates[model] = saved
+end
+
+local function restoreMagicState(model)
+    local saved = MAGIC.SavedStates[model]
+    if not saved then return end
+
+    local hum = model:FindFirstChildOfClass("Humanoid")
+    local isDead = (not hum) or hum.Health <= 0
+
+    -- Всегда снимаем Anchored / возвращаем коллизию / прозрачность
+    for part, data in pairs(saved.parts) do
+        if part and part.Parent then
+            pcall(function()
+                part.Anchored = data.anchored
+                part.CanCollide = data.cancollide
+                part.LocalTransparencyModifier = data.localTrans
+            end)
+        end
+    end
+
+    -- CFrame возвращаем ТОЛЬКО живым (мёртвым — не трогаем ragdoll)
+    if not isDead and saved.rootCFrame then
+        local root = model:FindFirstChild("HumanoidRootPart")
+        if root then
+            pcall(function()
+                root.Anchored = false
+                root.CFrame = saved.rootCFrame
+            end)
+        end
+    end
+
+    MAGIC.SavedStates[model] = nil
+end
+
+local function restoreAllMagic()
+    for model in pairs(MAGIC.SavedStates) do
+        restoreMagicState(model)
+    end
+    MAGIC.SavedStates = {}
+end
+
+local function getMagicPoint()
+    local cam = workspace.CurrentCamera
+    if not cam then return nil end
+    return cam.CFrame.Position + cam.CFrame.LookVector * MAGIC.Offset
+end
+
+local function teleportToMagicPoint(model, targetPos)
+    if not model or not model.Parent then return end
+    local myChar = LocalPlayer.Character
+    if model == myChar then return end
+
+    local hum = model:FindFirstChildOfClass("Humanoid")
+
+    -- Если модель уже в SavedStates — значит она телепортирована ранее
+    local alreadySaved = MAGIC.SavedStates[model] ~= nil
+
+    -- Мёртвая цель: если она была сохранена — восстановить и выкинуть из SavedStates
+    if not hum or hum.Health <= 0 then
+        if alreadySaved then
+            restoreMagicState(model)
+        end
+        return
+    end
+
+    saveMagicState(model)
+
+    local targetCF = CFrame.new(targetPos)
+    for _, part in ipairs(model:GetDescendants()) do
+        if part:IsA("BasePart") then
+            pcall(function()
+                part.CanCollide = false
+                part.Anchored = true
+                part.CFrame = targetCF
+                part.LocalTransparencyModifier = 1
+                part.AssemblyLinearVelocity = Vector3.zero
+                part.AssemblyAngularVelocity = Vector3.zero
+            end)
+        end
+    end
+end
+
+local function getMagicTargets()
+    local targets = {}
+    local myChar = LocalPlayer.Character
+
+    if MAGIC.TargetPlayers then
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer and plr.Character and plr.Character ~= myChar then
+                local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+                if hum and hum.Health > 0 then
+                    table.insert(targets, plr.Character)
+                end
+            end
+        end
+    end
+
+    if MAGIC.TargetBots then
+        local function scan(container)
+            for _, obj in ipairs(container:GetChildren()) do
+                if obj:IsA("Model") and obj ~= myChar then
+                    if not Players:GetPlayerFromCharacter(obj) then
+                        local hum = obj:FindFirstChildOfClass("Humanoid")
+                        if hum and hum.Health > 0 then
+                            table.insert(targets, obj)
+                        end
+                    end
+                elseif obj:IsA("Folder") or (obj:IsA("Model") and not obj:FindFirstChildOfClass("Humanoid")) then
+                    scan(obj)
+                end
+            end
+        end
+        scan(workspace)
+    end
+
+    return targets
+end
+
+local function startMagicBullet()
+    if MAGIC.Connection then return end
+    MAGIC.Connection = RunService.Heartbeat:Connect(function()
+        if not MAGIC.Enabled then return end
+
+        local now = tick()
+        if now - MAGIC.LastTeleport < MAGIC.Interval / 1000 then return end
+        MAGIC.LastTeleport = now
+
+        -- 1) Чистим мёртвых/удалённых из SavedStates
+        local toRestore = {}
+        for model in pairs(MAGIC.SavedStates) do
+            if not model or not model.Parent then
+                table.insert(toRestore, model)
+            else
+                local hum = model:FindFirstChildOfClass("Humanoid")
+                if not hum or hum.Health <= 0 then
+                    table.insert(toRestore, model)
+                end
+            end
+        end
+        for _, model in ipairs(toRestore) do
+            pcall(restoreMagicState, model)
+        end
+
+        -- 2) Телепортируем живых
+        local targetPos = getMagicPoint()
+        if not targetPos then return end
+
+        for _, enemy in ipairs(getMagicTargets()) do
+            pcall(teleportToMagicPoint, enemy, targetPos)
+        end
+    end)
+end
+
+local function stopMagicBullet()
+    if MAGIC.Connection then
+        MAGIC.Connection:Disconnect()
+        MAGIC.Connection = nil
+    end
+    restoreAllMagic()
+end
+
+makeToggle(tabs["COMBAT"].Container, "Magic Bullet", false, function(v)
+    MAGIC.Enabled = v
+    if v then
+        startMagicBullet()
+    else
+        stopMagicBullet()
+    end
+end)
+
+local magicSettings = makeCollapsible(tabs["COMBAT"].Container, "Magic Bullet Settings", false)
+
+makeToggle(magicSettings, "Target: Players", MAGIC.TargetPlayers, function(v)
+    MAGIC.TargetPlayers = v
+end)
+makeToggle(magicSettings, "Target: Bots", MAGIC.TargetBots, function(v)
+    MAGIC.TargetBots = v
+end)
+makeSlider(magicSettings, "Offset", 1, 20, 5, function(v)
+    MAGIC.Offset = v
+end)
+makeSlider(magicSettings, "Interval (ms)", 20, 200, 50, function(v)
+    MAGIC.Interval = v
 end)
 
 -- Draw FOV тумблер (сам по себе) + ползунок FOV Radius под ним
@@ -1489,6 +1788,8 @@ local ESP = {
         Name = false,
         Distance = false,
     },
+    TargetPlayers = true,
+    TargetBots = true,
     Objects = {},
 }
 
@@ -1704,57 +2005,82 @@ local function getHumanoid(model)
     return model:FindFirstChildOfClass("Humanoid")
 end
 
--- Рекурсивный сбор ВСЕХ целей (игроки + боты в любой папке)
-local function getTargets()
+-- ===== КЭШ ЦЕЛЕЙ ESP =====
+local ESP_TARGET_CACHE = {}
+local ESP_CACHE_TIME = 0
+local ESP_CACHE_INTERVAL = 0.25
+
+-- Рекурсивный сбор целей с учётом ESP.TargetType
+local function getTargetsRaw()
     local targets = {}
     local myChar = LocalPlayer.Character
-    local seen = {} -- защита от дубликатов
+    local seen = {}
+    local wantPlayers = ESP.TargetPlayers
+    local wantBots    = ESP.TargetBots
 
-    -- 1) Игроки
-    for _, plr in ipairs(Players:GetPlayers()) do
-        if plr ~= LocalPlayer and plr.Character and plr.Character.Parent then
-            local hum = getHumanoid(plr.Character)
-            local root = getRoot(plr.Character)
-            if hum and root and hum.Health > 0 then
-                seen[plr.Character] = true
-                table.insert(targets, {
-                    model = plr.Character,
-                    root = root,
-                    hum = hum,
-                    name = plr.Name,
-                    isPlayer = true
-                })
-            end
-        end
-    end
-
-    -- 2) Боты / NPC — рекурсивно обходим ВЕСЬ workspace
-    local function scan(container)
-        for _, obj in ipairs(container:GetChildren()) do
-            if obj:IsA("Model") and obj ~= myChar and not seen[obj] then
-                if not Players:GetPlayerFromCharacter(obj) then
-                    local hum = getHumanoid(obj)
-                    local root = getRoot(obj)
-                    if hum and root and hum.Health > 0 then
-                        seen[obj] = true
-                        table.insert(targets, {
-                            model = obj,
-                            root = root,
-                            hum = hum,
-                            name = obj.Name,
-                            isPlayer = false
-                        })
-                    end
+    if wantPlayers then
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer and plr.Character and plr.Character.Parent then
+                local hum = getHumanoid(plr.Character)
+                local root = getRoot(plr.Character)
+                if hum and root and hum.Health > 0 then
+                    seen[plr.Character] = true
+                    table.insert(targets, {
+                        model = plr.Character,
+                        root = root,
+                        hum = hum,
+                        name = plr.Name,
+                        isPlayer = true
+                    })
                 end
-            elseif obj:IsA("Folder") or (obj:IsA("Model") and not getHumanoid(obj)) then
-                -- Углубляемся в папки и вложенные модели (Bots, NPCs, Mobs, Enemies...)
-                scan(obj)
             end
         end
     end
-    scan(workspace)
+
+    if wantBots then
+        local function scan(container)
+            for _, obj in ipairs(container:GetChildren()) do
+                if obj:IsA("Model") and obj ~= myChar and not seen[obj] then
+                    if not Players:GetPlayerFromCharacter(obj) then
+                        local hum = getHumanoid(obj)
+                        local root = getRoot(obj)
+                        if hum and root and hum.Health > 0 then
+                            seen[obj] = true
+                            table.insert(targets, {
+                                model = obj,
+                                root = root,
+                                hum = hum,
+                                name = obj.Name,
+                                isPlayer = false
+                            })
+                        end
+                    end
+                elseif obj:IsA("Folder") or (obj:IsA("Model") and not getHumanoid(obj)) then
+                    scan(obj)
+                end
+            end
+        end
+        scan(workspace)
+    end
 
     return targets
+end
+
+local function getTargets()
+    local now = tick()
+    if now - ESP_CACHE_TIME < ESP_CACHE_INTERVAL and #ESP_TARGET_CACHE > 0 then
+        local filtered = {}
+        for _, t in ipairs(ESP_TARGET_CACHE) do
+            if t.model and t.model.Parent and t.hum and t.hum.Health > 0 then
+                table.insert(filtered, t)
+            end
+        end
+        ESP_TARGET_CACHE = filtered
+        return filtered
+    end
+    ESP_TARGET_CACHE = getTargetsRaw()
+    ESP_CACHE_TIME = now
+    return ESP_TARGET_CACHE
 end
 
 -- Основной цикл обновления ESP
@@ -2028,6 +2354,16 @@ makeToggle(tabs["ESP"].Container, "Highlight", false, function(v) ESP.Enabled.Hi
 makeToggle(tabs["ESP"].Container, "Name", false, function(v) ESP.Enabled.Name = v end)
 makeToggle(tabs["ESP"].Container, "Distance", false, function(v) ESP.Enabled.Distance = v end)
 
+-- Под-окно "Target Settings" (ESP)
+local espTargetSettings = makeCollapsible(tabs["ESP"].Container, "Target Settings", false)
+
+makeToggle(espTargetSettings, "Players", ESP.TargetPlayers, function(v)
+    ESP.TargetPlayers = v
+end)
+makeToggle(espTargetSettings, "Bots", ESP.TargetBots, function(v)
+    ESP.TargetBots = v
+end)
+
 -- =========================================================
 -- MISC: BUNNY HOP (не сбрасывается при респавне)
 -- =========================================================
@@ -2080,6 +2416,10 @@ end
 --
 -- Решение: физически двигаем HumanoidRootPart через LinearVelocity
 -- в направлении движения с полной скоростью, независимо от ввода.
+--
+-- ВАЖНО: MaxForce НЕ math.huge — иначе физика ломается
+-- (выкидывает из стен, дёргает ragdoll, конфликтует с Humanoid).
+-- 100000 достаточно, чтобы перебить input-scale, но не ломать физику.
 
 local strafeAttachment = nil
 local strafeLinearVel = nil
@@ -2122,7 +2462,8 @@ local function onStrafeFix()
         strafeLinearVel = Instance.new("LinearVelocity")
         strafeLinearVel.Name = "SlaughterStrafeLV"
         strafeLinearVel.Attachment0 = strafeAttachment
-        strafeLinearVel.MaxForce = math.huge
+        -- НЕ math.huge! Ограничиваем силу — иначе физика ломается.
+        strafeLinearVel.MaxForce = 100000
         strafeLinearVel.VelocityConstraintMode = Enum.VelocityConstraintMode.Plane
         strafeLinearVel.PlaneNormal = Vector3.new(0, 1, 0)
         strafeLinearVel.PlaneVelocity = Vector2.new(0, 0)
@@ -2186,11 +2527,14 @@ makeToggle(tabs["Misc"].Container, "Bunny Hop", false, function(v)
     else
         stopBunnyHop()
         stopStrafeFix()
-        local char = LocalPlayer.Character
-        if char then
-            local hum = char:FindFirstChildOfClass("Humanoid")
-            if hum then hum.WalkSpeed = 16 end
-        end
+        -- ждём, чтобы Strafe успел почистить LinearVelocity, потом ставим дефолт
+        task.delay(0.1, function()
+            local char = LocalPlayer.Character
+            if char then
+                local hum = char:FindFirstChildOfClass("Humanoid")
+                if hum then hum.WalkSpeed = 16 end
+            end
+        end)
     end
 end)
 
@@ -2379,8 +2723,15 @@ local FAST_ALIVE = {
     SpamTask = nil,
 }
 
--- Эмулируем нажатие пробела (реальная клавиша)
+-- Эмулируем нажатие пробела: сначала executor keypress, потом VIM
 local function pressSpace()
+    local ok = pcall(function()
+        keypress(Enum.KeyCode.Space, true)
+        task.wait(0.02)
+        keypress(Enum.KeyCode.Space, false)
+    end)
+    if ok then return end
+
     pcall(function()
         local VirtualInputManager = game:GetService("VirtualInputManager")
         VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
@@ -2435,10 +2786,9 @@ end)
 
 local HITBOX = {
     Enabled = false,
-    Size = 30,           -- во сколько раз увеличить (30x = огромная голова)
-    Transparency = false, -- не портим вид, оставляем как есть
+    Size = 10,           -- ФИКСИРОВАННЫЙ размер головы в студах (10 = норм)
     Connection = nil,
-    Modified = {},       -- [head] = {Size, Transparency, Color, CanCollide}
+    Modified = {},       -- [head] = {Size, Transparency, Color, CanCollide, Massless}
     LastScan = 0,
 }
 
@@ -2449,7 +2799,14 @@ local function expandHead(model)
 
     local head = model:FindFirstChild("Head")
     if not head or not head:IsA("BasePart") then return end
-    if HITBOX.Modified[head] then return end  -- уже расширено
+    if HITBOX.Modified[head] then
+        -- уже расширено — просто обновим размер, если слайдер двигали
+        if HITBOX.Modified[head].Applied ~= HITBOX.Size then
+            head.Size = Vector3.new(HITBOX.Size, HITBOX.Size, HITBOX.Size)
+            HITBOX.Modified[head].Applied = HITBOX.Size
+        end
+        return
+    end
 
     -- Запоминаем оригинал
     HITBOX.Modified[head] = {
@@ -2458,10 +2815,11 @@ local function expandHead(model)
         Color = head.Color,
         CanCollide = head.CanCollide,
         Massless = head.Massless,
+        Applied = HITBOX.Size,
     }
 
-    -- Расширяем
-    head.Size = head.Size * HITBOX.Size
+    -- Расширяем до ФИКСИРОВАННОГО куба
+    head.Size = Vector3.new(HITBOX.Size, HITBOX.Size, HITBOX.Size)
     head.CanCollide = false
     head.Massless = true
 end
@@ -2565,10 +2923,11 @@ makeToggle(tabs["Misc"].Container, "Hitbox Expander", false, function(v)
     end
 end)
 
-makeSlider(tabs["Misc"].Container, "Hitbox Size", 5, 100, 30, function(v)
+makeSlider(tabs["Misc"].Container, "Hitbox Size", 2, 30, 10, function(v)
     HITBOX.Size = v
+    -- пересоздадим при следующем скане
     if HITBOX.Enabled then
-        resetAll() -- пересоздаст с новым размером при следующем скане
+        resetAll()
     end
 end)
 
@@ -2737,181 +3096,6 @@ makeSlider(flySettings, "Fly Speed", 10, 300, 50, function(v)
     FLY.Speed = v
 end)
 
--- =========================================================
--- MISC: MAGNET v2 — телепорт врагов + автофаер + режимы
--- =========================================================
-
-local MAGNET = {
-    Enabled = false,
-    Connection = nil,
-    AutoFire = false,
-    Mode = "Aim",
-    Offset = 3,
-    TargetBots = true,      -- телепорт ботов
-    TargetPlayers = true,   -- телепорт живых игроков
-}
-
-local magnetFireLast = 0
-
-local function getAimPoint()
-    local camera = workspace.CurrentCamera
-    if not camera then return nil end
-    return camera.CFrame.Position + camera.CFrame.LookVector * MAGNET.Offset
-end
-
-local function getPlayerPoint()
-    local char = LocalPlayer.Character
-    if not char then return nil end
-    local root = char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart
-    return root and root.Position or nil
-end
-
-local function teleportModel(model, targetPos)
-    if not model or not model.Parent then return end
-    local myChar = LocalPlayer.Character
-    if model == myChar then return end
-
-    local hum = model:FindFirstChildOfClass("Humanoid")
-    if not hum or hum.Health <= 0 then return end
-
-    for _, part in ipairs(model:GetDescendants()) do
-        if part:IsA("BasePart") then
-            pcall(function()
-                part.CanCollide = false
-                part.CFrame = CFrame.new(targetPos)
-            end)
-        end
-    end
-end
-
-local function getPlayerEnemies()
-    local enemies = {}
-    local myChar = LocalPlayer.Character
-    for _, plr in ipairs(Players:GetPlayers()) do
-        if plr ~= LocalPlayer and plr.Character and plr.Character ~= myChar then
-            local hum = plr.Character:FindFirstChildOfClass("Humanoid")
-            if hum and hum.Health > 0 then
-                table.insert(enemies, plr.Character)
-            end
-        end
-    end
-    return enemies
-end
-
-local function getBotEnemies()
-    local enemies = {}
-    local myChar = LocalPlayer.Character
-    local function scan(container)
-        for _, obj in ipairs(container:GetChildren()) do
-            if obj:IsA("Model") and obj ~= myChar then
-                if not Players:GetPlayerFromCharacter(obj) then
-                    local hum = obj:FindFirstChildOfClass("Humanoid")
-                    if hum and hum.Health > 0 then
-                        table.insert(enemies, obj)
-                    end
-                end
-            elseif obj:IsA("Folder") or (obj:IsA("Model") and not obj:FindFirstChildOfClass("Humanoid")) then
-                scan(obj)
-            end
-        end
-    end
-    scan(workspace)
-    return enemies
-end
-
-local function getAllEnemies()
-    local enemies = {}
-    if MAGNET.TargetPlayers then
-        for _, e in ipairs(getPlayerEnemies()) do
-            table.insert(enemies, e)
-        end
-    end
-    if MAGNET.TargetBots then
-        for _, e in ipairs(getBotEnemies()) do
-            table.insert(enemies, e)
-        end
-    end
-    return enemies
-end
-
-local function magnetAutoFire()
-    if not MAGNET.AutoFire then return end
-    local now = tick()
-    if now - magnetFireLast < 0.05 then return end
-    magnetFireLast = now
-
-    pcall(function()
-        local VirtualInputManager = game:GetService("VirtualInputManager")
-        VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 1)
-        task.defer(function()
-            task.wait(0.01)
-            VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 1)
-        end)
-    end)
-end
-
-local function startMagnet()
-    if MAGNET.Connection then return end
-
-    MAGNET.Connection = RunService.Heartbeat:Connect(function()
-        if not MAGNET.Enabled then return end
-
-        local target
-        if MAGNET.Mode == "Player" then
-            target = getPlayerPoint()
-        else
-            target = getAimPoint()
-        end
-        if not target then return end
-
-        for _, enemy in ipairs(getAllEnemies()) do
-            pcall(teleportModel, enemy, target)
-        end
-
-        magnetAutoFire()
-    end)
-end
-
-local function stopMagnet()
-    if MAGNET.Connection then
-        MAGNET.Connection:Disconnect()
-        MAGNET.Connection = nil
-    end
-end
-
--- Главный тумблер Magnet
-makeToggle(tabs["Misc"].Container, "Magnet", false, function(v)
-    MAGNET.Enabled = v
-    if v then startMagnet() else stopMagnet() end
-end)
-
--- Под-окно "Magnet Mode"
-local magnetSettings = makeCollapsible(tabs["Misc"].Container, "Magnet Mode", false)
-
-makeToggle(magnetSettings, "Auto Fire", false, function(v)
-    MAGNET.AutoFire = v
-end)
-
-makeToggle(magnetSettings, "Mode: to Me", false, function(v)
-    MAGNET.Mode = v and "Player" or "Aim"
-end)
-
-makeSlider(magnetSettings, "Magnet Offset", 1, 15, 3, function(v)
-    MAGNET.Offset = v
-end)
-
--- Цели телепорта
-makeToggle(magnetSettings, "Target Bots", true, function(v)
-    MAGNET.TargetBots = v
-end)
-
-makeToggle(magnetSettings, "Target Players", true, function(v)
-    MAGNET.TargetPlayers = v
-end)
-
--- =========================================================
--- KEYBIND: K — открыть/закрыть GUI + MiniHud
--- =========================================================
 guiVisible = false
 local keybindLabel
 
@@ -2928,9 +3112,11 @@ function openGUI()
     guiVisible = true
     ScreenGui.Enabled = true
 
-    -- Сбрасываем состояние
+    -- Сохраняем текущую позицию (после drag), чтобы окно не прыгало в центр
+    local savedPos = Main.Position
+
+    -- Сбрасываем состояние (размер — в дефолт, позицию НЕ трогаем)
     Main.Size = UDim2.new(0, 540, 0, 420)
-    Main.Position = UDim2.new(0.5, -270, 0.5, -210)
     Main.BackgroundTransparency = 0.5
     MainStroke.Transparency = 1
     GlowStroke.Transparency = 1
@@ -2949,10 +3135,9 @@ function openGUI()
 
     -- Лёгкий scale-pop (от 0.95 → 1)
     Main.Size = UDim2.new(0, 540 * 0.95, 0, 420 * 0.95)
-    Main.Position = UDim2.new(0.5, -270 * 0.95, 0.5, -210 * 0.95)
     TweenService:Create(Main, TweenInfo.new(0.45, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
         Size = UDim2.new(0, 540, 0, 420),
-        Position = UDim2.new(0.5, -270, 0.5, -210)
+        Position = savedPos
     }):Play()
 
     TweenService:Create(MainStroke, TweenInfo.new(0.4), {Transparency = 0}):Play()
@@ -3000,11 +3185,13 @@ function closeGUI()
     guiVisible = false
 
     -- Scale-out (сжатие вниз)
+    -- Сохраняем позицию, чтобы не прыгало при следующем открытии
+    local savedPos = Main.Position
     TweenService:Create(Main, TweenInfo.new(0.3, Enum.EasingStyle.Quint, Enum.EasingDirection.In), {
         Size = UDim2.new(0, 540 * 0.9, 0, 420 * 0.9),
-        Position = UDim2.new(0.5, -270 * 0.9, 0.5, -210 * 0.9),
         BackgroundTransparency = 1
     }):Play()
+    -- Position не трогаем — останется где было
 
     TweenService:Create(MainStroke, TweenInfo.new(0.3), {Transparency = 1}):Play()
     TweenService:Create(GlowStroke, TweenInfo.new(0.3), {Transparency = 1}):Play()
@@ -3107,9 +3294,9 @@ local function unloadScript()
         pcall(function() scrollConnection:Disconnect() end)
         scrollConnection = nil
     end
-    if INTRO_CONNECTION then
-        pcall(function() INTRO_CONNECTION:Disconnect() end)
-        INTRO_CONNECTION = nil
+    if MAIN_DRAG and MAIN_DRAG.connChanged then
+        pcall(function() MAIN_DRAG.connChanged:Disconnect() end)
+        MAIN_DRAG.connChanged = nil
     end
 
     -- =========================================================
@@ -3175,15 +3362,17 @@ local function unloadScript()
     end
 
     -- =========================================================
-    -- 5) Magnet — стоп
+    -- 5.0) Magic Bullet — стоп + восстановить цели
     -- =========================================================
-    if MAGNET then
-        MAGNET.Enabled = false
-        if MAGNET.Connection then
-            pcall(function() MAGNET.Connection:Disconnect() end)
-            MAGNET.Connection = nil
+    if MAGIC then
+        MAGIC.Enabled = false
+        if MAGIC.Connection then
+            pcall(function() MAGIC.Connection:Disconnect() end)
+            MAGIC.Connection = nil
         end
+        pcall(restoreAllMagic)
     end
+
 
     -- =========================================================
     -- 5.1) Noclip — стоп
@@ -3311,6 +3500,19 @@ local function unloadScript()
     ESP.Enabled.Name = false
     ESP.Enabled.Distance = false
 
+    -- =========================================================
+    -- 12) MiniHud FPS/Ping — отключаем соединение и таск
+    -- =========================================================
+    if fpsFrameConnection then
+        pcall(function() fpsFrameConnection:Disconnect() end)
+        fpsFrameConnection = nil
+    end
+    if fpsLoopTask then
+        pcall(function() task.cancel(fpsLoopTask) end)
+        fpsLoopTask = nil
+    end
+    MINI_HUD_FPS_FRAMES = 0
+
     print("[SLAUGHTER] Fully unloaded. All GUI and connections removed.")
 end
 
@@ -3388,173 +3590,6 @@ KIKeyC.Parent = KIKey
 
 -- =========================================================
 -- УВЕДОМЛЕНИЯ v2 (слайд-ин + glow + прогресс-бар)
--- =========================================================
-local NotifyGui = Instance.new("ScreenGui")
-NotifyGui.Name = "SlaughterNotifications"
-NotifyGui.ResetOnSpawn = false
-NotifyGui.DisplayOrder = 999
-NotifyGui.IgnoreGuiInset = true
-pcall(function() NotifyGui.Parent = CoreGui end)
-if not NotifyGui.Parent then NotifyGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
-
-local NotifyHolder = Instance.new("Frame")
-NotifyHolder.Size = UDim2.new(0, 300, 0, 600)
-NotifyHolder.Position = UDim2.new(1, -315, 0, 15)
-NotifyHolder.BackgroundTransparency = 1
-NotifyHolder.Parent = NotifyGui
-
-local NotifyLayout = Instance.new("UIListLayout")
-NotifyLayout.SortOrder = Enum.SortOrder.LayoutOrder
-NotifyLayout.Padding = UDim.new(0, 10)
-NotifyLayout.Parent = NotifyHolder
-
-local function notify(title, text, duration, accentColor)
-    accentColor = accentColor or Color3.fromRGB(255, 30, 30)
-    duration = duration or 2
-
-    local Holder = Instance.new("Frame")
-    Holder.Size = UDim2.new(1, 0, 0, 64)
-    Holder.BackgroundTransparency = 1
-    Holder.ClipsDescendants = false
-    Holder.Parent = NotifyHolder
-
-    local Notif = Instance.new("Frame")
-    Notif.Size = UDim2.new(1, 0, 1, 0)
-    Notif.Position = UDim2.new(1, 320, 0, 0)
-    Notif.BackgroundColor3 = Color3.fromRGB(15, 15, 18)
-    Notif.BackgroundTransparency = 0.1
-    Notif.BorderSizePixel = 0
-    Notif.Parent = Holder
-
-    local NC = Instance.new("UICorner")
-    NC.CornerRadius = UDim.new(0, 10)
-    NC.Parent = Notif
-
-    local NS = Instance.new("UIStroke")
-    NS.Color = accentColor
-    NS.Thickness = 1
-    NS.Transparency = 0.4
-    NS.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-    NS.Parent = Notif
-
-    local NGlow = Instance.new("UIStroke")
-    NGlow.Color = accentColor
-    NGlow.Thickness = 3
-    NGlow.Transparency = 0.85
-    NGlow.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-    NGlow.Parent = Notif
-
-    local NGrad = Instance.new("UIGradient")
-    NGrad.Color = ColorSequence.new{
-        ColorSequenceKeypoint.new(0, Color3.fromRGB(25, 25, 30)),
-        ColorSequenceKeypoint.new(1, Color3.fromRGB(12, 12, 15)),
-    }
-    NGrad.Rotation = 90
-    NGrad.Parent = Notif
-
-    local AB = Instance.new("Frame")
-    AB.Size = UDim2.new(0, 3, 1, -20)
-    AB.Position = UDim2.new(0, 6, 0.5, 0)
-    AB.AnchorPoint = Vector2.new(0, 0.5)
-    AB.BackgroundColor3 = accentColor
-    AB.BorderSizePixel = 0
-    AB.Parent = Notif
-
-    local ABC = Instance.new("UICorner")
-    ABC.CornerRadius = UDim.new(1, 0)
-    ABC.Parent = AB
-
-    local Icon = Instance.new("Frame")
-    Icon.Size = UDim2.new(0, 8, 0, 8)
-    Icon.Position = UDim2.new(0, 16, 0, 16)
-    Icon.BackgroundColor3 = accentColor
-    Icon.BorderSizePixel = 0
-    Icon.Parent = Notif
-
-    local IconC = Instance.new("UICorner")
-    IconC.CornerRadius = UDim.new(1, 0)
-    IconC.Parent = Icon
-
-    local NT = Instance.new("TextLabel")
-    NT.Size = UDim2.new(1, -40, 0, 20)
-    NT.Position = UDim2.new(0, 30, 0, 12)
-    NT.BackgroundTransparency = 1
-    NT.Text = title
-    NT.TextColor3 = Color3.fromRGB(255, 255, 255)
-    NT.TextSize = 14
-    NT.Font = Enum.Font.GothamBlack
-    NT.TextXAlignment = Enum.TextXAlignment.Left
-    NT.Parent = Notif
-
-    local NText = Instance.new("TextLabel")
-    NText.Size = UDim2.new(1, -30, 0, 16)
-    NText.Position = UDim2.new(0, 16, 0, 34)
-    NText.BackgroundTransparency = 1
-    NText.Text = text
-    NText.TextColor3 = Color3.fromRGB(175, 175, 185)
-    NText.TextSize = 11
-    NText.Font = Enum.Font.Gotham
-    NText.TextXAlignment = Enum.TextXAlignment.Left
-    NText.TextTruncate = Enum.TextTruncate.AtEnd
-    NText.Parent = Notif
-
-    local ProgressTrack = Instance.new("Frame")
-    ProgressTrack.Size = UDim2.new(1, -20, 0, 2)
-    ProgressTrack.Position = UDim2.new(0, 10, 1, -5)
-    ProgressTrack.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
-    ProgressTrack.BorderSizePixel = 0
-    ProgressTrack.Parent = Notif
-
-    local PTC = Instance.new("UICorner")
-    PTC.CornerRadius = UDim.new(1, 0)
-    PTC.Parent = ProgressTrack
-
-    local ProgressFill = Instance.new("Frame")
-    ProgressFill.Size = UDim2.new(1, 0, 1, 0)
-    ProgressFill.BackgroundColor3 = accentColor
-    ProgressFill.BorderSizePixel = 0
-    ProgressFill.Parent = ProgressTrack
-
-    local PFC = Instance.new("UICorner")
-    PFC.CornerRadius = UDim.new(1, 0)
-    PFC.Parent = ProgressFill
-
-    TweenService:Create(Notif, TweenInfo.new(0.45, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
-        Position = UDim2.new(0, 0, 0, 0)
-    }):Play()
-
-    task.spawn(function()
-        while Notif.Parent do
-            TweenService:Create(Icon, TweenInfo.new(0.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {BackgroundTransparency = 0.7, Size = UDim2.new(0, 12, 0, 12), Position = UDim2.new(0, 14, 0, 14)}):Play()
-            task.wait(0.6)
-            TweenService:Create(Icon, TweenInfo.new(0.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {BackgroundTransparency = 0, Size = UDim2.new(0, 8, 0, 8), Position = UDim2.new(0, 16, 0, 16)}):Play()
-            task.wait(0.6)
-        end
-    end)
-
-    TweenService:Create(ProgressFill, TweenInfo.new(duration, Enum.EasingStyle.Linear), {Size = UDim2.new(0, 0, 1, 0)}):Play()
-
-    task.delay(duration, function()
-        if not Notif.Parent then return end
-        TweenService:Create(Notif, TweenInfo.new(0.35, Enum.EasingStyle.Quint, Enum.EasingDirection.In), {
-            Position = UDim2.new(1, 320, 0, 0),
-            BackgroundTransparency = 1
-        }):Play()
-        TweenService:Create(NS, TweenInfo.new(0.3), {Transparency = 1}):Play()
-        TweenService:Create(NGlow, TweenInfo.new(0.3), {Transparency = 1}):Play()
-        TweenService:Create(NT, TweenInfo.new(0.3), {TextTransparency = 1}):Play()
-        TweenService:Create(NText, TweenInfo.new(0.3), {TextTransparency = 1}):Play()
-        TweenService:Create(AB, TweenInfo.new(0.3), {BackgroundTransparency = 1}):Play()
-        TweenService:Create(Icon, TweenInfo.new(0.3), {BackgroundTransparency = 1}):Play()
-        TweenService:Create(ProgressTrack, TweenInfo.new(0.3), {BackgroundTransparency = 1}):Play()
-        TweenService:Create(ProgressFill, TweenInfo.new(0.3), {BackgroundTransparency = 1}):Play()
-        task.wait(0.4)
-        if Holder.Parent then Holder:Destroy() end
-    end)
-end
-
--- =========================================================
--- УВЕДОМЛЕНИЯ v2 — слайд-ин + glow + прогресс-бар
 -- =========================================================
 local NotifyGui = Instance.new("ScreenGui")
 NotifyGui.Name = "SlaughterNotifications"
