@@ -176,7 +176,7 @@ NoSupportLabel.Size = UDim2.new(0, 60, 0, 18)
 NoSupportLabel.Position = UDim2.new(0, 175, 0.5, -9)
 NoSupportLabel.BackgroundColor3 = Color3.fromRGB(255, 140, 40)
 NoSupportLabel.BackgroundTransparency = 0.85
-NoSupportLabel.Text = " v2.0 "
+NoSupportLabel.Text = " v3.0 "
 NoSupportLabel.TextColor3 = Color3.fromRGB(255, 180, 100)
 NoSupportLabel.TextSize = 10
 NoSupportLabel.Font = Enum.Font.GothamBold
@@ -3935,7 +3935,7 @@ local function runIntro()
     LVer.Size = UDim2.new(0, 80, 0, 14)
     LVer.Position = UDim2.new(0, 64, 0, 46)
     LVer.BackgroundTransparency = 1
-    LVer.Text = "EXECUTOR v2.0"
+    LVer.Text = "VERSION v3.0"
     LVer.TextColor3 = Color3.fromRGB(255, 140, 40)
     LVer.TextSize = 10
     LVer.Font = Enum.Font.GothamBold
@@ -4217,13 +4217,13 @@ end
 -- =========================================================
 -- СТАРТ
 -- =========================================================
-notify("SLAUGHTER", "Xeno Full Supported", 2, Color3.fromRGB(80, 255, 120))
+notify("SLAUGHTER", "Full Supported", 2, Color3.fromRGB(80, 255, 120))
 task.wait(0.4)
 notify("SLAUGHTER", "Injecting interface...", 2, Color3.fromRGB(255, 200, 50))
 task.wait(0.3)
-notify("SLAUGHTER", "2.0 — full support enabled", 3, Color3.fromRGB(255, 140, 40))
+notify("SLAUGHTER", "3.0 — full support enabled", 3, Color3.fromRGB(255, 140, 40))
 task.wait(0.6)
 
 runIntro()
 
-print("[SLAUGHTER] 2.0 загружен! Бинд на K — открыть/закрыть GUI.")
+print("[SLAUGHTER] 3.0 загружен! Бинд на K — открыть/закрыть GUI.")
