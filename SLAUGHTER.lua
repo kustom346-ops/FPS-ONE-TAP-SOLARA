@@ -10,7 +10,12 @@ local LocalPlayer = Players.LocalPlayer
 local espConnection = nil
 local inputConnection = nil
 local aimConnection = nil
-local INTRO_CONNECTION = nil
+local _INTRO_CONNECTION = nil
+
+-- ФОРВАРД-ДЕКЛАРАЦИИ ДЛЯ WAVE
+local closeGUI, openGUI, showMiniHud, hideMiniHud
+local _G = getgenv()
+local _notify
 
 -- Чистим старые
 for _, name in ipairs({"SlaughterGUI", "SlaughterIntro", "SlaughterNotifications"}) do
@@ -242,7 +247,7 @@ CloseBtn.MouseLeave:Connect(function()
 end)
 
 CloseBtn.MouseButton1Click:Connect(function()
-    if closeGUI then closeGUI() end
+    if closeGUI then task.defer(closeGUI) end
 end)
 
 local MinBtn = Instance.new("TextButton")
@@ -276,7 +281,7 @@ MinBtn.MouseLeave:Connect(function()
 end)
 
 MinBtn.MouseButton1Click:Connect(function()
-    if closeGUI then closeGUI() end
+    if closeGUI then task.defer(closeGUI) end
 end)
 
 -- ===== SIDEBAR =====
@@ -505,7 +510,7 @@ local fpsFrameConnection = nil
 local fpsLoopTask = nil
 
 fpsFrameConnection = RunService.RenderStepped:Connect(function()
-    MINI_HUD_FPS_FRAMES = (MINI_HUD_FPS_FRAMES or 0) + 1
+    _G.MINI_HUD_FPS_FRAMES = (_G.MINI_HUD_FPS_FRAMES or 0) + 1
 end)
 
 fpsLoopTask = task.spawn(function()
@@ -517,17 +522,14 @@ fpsLoopTask = task.spawn(function()
         local now = tick()
         local elapsed = now - lastTime
         if elapsed > 0 then
-            fps = math.floor((MINI_HUD_FPS_FRAMES or 0) / elapsed + 0.5)
+            fps = math.floor((_G.MINI_HUD_FPS_FRAMES or 0) / elapsed + 0.5)
         end
-        MINI_HUD_FPS_FRAMES = 0
+        _G.MINI_HUD_FPS_FRAMES = 0
         lastTime = now
 
         MHFPS.Text = "FPS " .. fps
 
-        local ok, ping = pcall(function()
-            return math.floor(game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValue())
-        end)
-        MHPing.Text = "PING " .. (ok and ping or 0)
+        MHPing.Text = "PING 0"
     end
 end)
 
@@ -1418,12 +1420,9 @@ AIM.Smoothness = 0.35      -- 0 = мгновенно, 1 = не двигаетс�
 AIM.AutoFireDelay = 0.05   -- задержка между выстрелами
 AIM.VisibleColor = false   -- красить цель в красный когда видно
 
--- Получаем пинг игрока (если есть)
+-- Получаем пинг игрока (если есть) — заглушка для Wave
 local function getPing()
-    local ok, ping = pcall(function()
-        return game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValue() / 1000
-    end)
-    return ok and ping or 0
+    return 0
 end
 
 -- Автофайр: сначала пробуем executor-функции (mouse1click / mouse1press),
@@ -1508,6 +1507,194 @@ aimConnection = RunService.RenderStepped:Connect(function(dt)
     end
 end)
 
+-- =========================================================
+-- FAST SHOOT (KUSTOM CONSTANTS)
+-- =========================================================
+
+local RAPID_CONFIG = {
+    Enabled = false,
+    Speed = 50,
+}
+
+-- Подгружаем WeaponManager для изменения констант
+local WeaponManager = nil
+pcall(function()
+    WeaponManager = require(game:GetService("ReplicatedStorage").Common.Managers.WeaponManager)
+end)
+
+local function applyRapidFire(enabled, speed)
+    if not WeaponManager then return end
+    
+    if enabled then
+        -- Врубаем пулемет
+        WeaponManager.Constants.DEFAULT_FIRERATE = speed
+        WeaponManager.Constants.DEFAULT_PISTOL_FIRERATE = speed
+        WeaponManager.Constants.DEFAULT_RELOAD_TIME = 0.1
+        WeaponManager.Constants.DEFAULT_MAGAZINE = 999
+    else
+        -- Возвращаем всё как было (снайперка снова болтовка)
+        WeaponManager.Constants.DEFAULT_FIRERATE = 2
+        WeaponManager.Constants.DEFAULT_PISTOL_FIRERATE = 4
+        WeaponManager.Constants.DEFAULT_RELOAD_TIME = 0.75
+        WeaponManager.Constants.DEFAULT_MAGAZINE = 1
+    end
+end
+
+local rapidSettings = makeCollapsible(tabs["COMBAT"].Container, "Fast Shoot (Rapid Fire)", true)
+
+local speedSlider
+
+local rapidToggle = makeToggle(rapidSettings, "Enable Rapid Fire", false, function(v)
+    RAPID_CONFIG.Enabled = v
+    local currentSpeed = speedSlider and speedSlider.Get() or 50
+    applyRapidFire(v, currentSpeed)
+end)
+
+speedSlider = makeSlider(rapidSettings, "Fire Rate Speed", 10, 100, 50, function(v)
+    RAPID_CONFIG.Speed = v
+    if RAPID_CONFIG.Enabled then
+        applyRapidFire(true, v)
+    end
+end)
+
+-- =========================================================
+-- SILENT AIM (Bytenet Hook)
+-- =========================================================
+
+local SILENT_AIM = {
+    Enabled = false,
+    FOV = 200,
+    TargetPart = "Head",
+    TargetPlayers = true,
+    TargetBots = true,
+}
+
+-- Безопасно ищем WeaponPackets в памяти
+local WeaponPacketsTable = nil
+for _, obj in ipairs(getgc(true)) do
+    if type(obj) == "table" and rawget(obj, "startShoot") then
+        WeaponPacketsTable = obj
+        break
+    end
+end
+
+-- Функция поиска цели
+local function getSilentAimTarget()
+    local camera = workspace.CurrentCamera
+    local myChar = LocalPlayer.Character
+    if not myChar then return nil end
+
+    local screenCenter = Vector2.new(camera.ViewportSize.X / 2, camera.ViewportSize.Y / 2)
+    local bestTarget, bestPart, bestDist = nil, nil, SILENT_AIM.FOV
+
+    -- Игроки
+    if SILENT_AIM.TargetPlayers then
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer and plr.Character then
+                local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+                if hum and hum.Health > 0 then
+                    local part = plr.Character:FindFirstChild(SILENT_AIM.TargetPart) or plr.Character:FindFirstChild("HumanoidRootPart")
+                    if part then
+                        local sp, onScreen = camera:WorldToViewportPoint(part.Position)
+                        if onScreen and sp.Z > 0 then
+                            local dist = (Vector2.new(sp.X, sp.Y) - screenCenter).Magnitude
+                            if dist < bestDist then
+                                bestDist = dist
+                                bestTarget = plr.Character
+                                bestPart = part
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- Боты
+    if SILENT_AIM.TargetBots then
+        local function scan(container)
+            for _, obj in ipairs(container:GetChildren()) do
+                if obj:IsA("Model") and obj ~= myChar and not Players:GetPlayerFromCharacter(obj) then
+                    local hum = obj:FindFirstChildOfClass("Humanoid")
+                    if hum and hum.Health > 0 then
+                        local part = obj:FindFirstChild(SILENT_AIM.TargetPart) or obj:FindFirstChild("HumanoidRootPart")
+                        if part then
+                            local sp, onScreen = camera:WorldToViewportPoint(part.Position)
+                            if onScreen and sp.Z > 0 then
+                                local dist = (Vector2.new(sp.X, sp.Y) - screenCenter).Magnitude
+                                if dist < bestDist then
+                                    bestDist = dist
+                                    bestTarget = obj
+                                    bestPart = part
+                                end
+                            end
+                        end
+                    end
+                elseif obj:IsA("Folder") then
+                    scan(obj)
+                end
+            end
+        end
+        scan(workspace)
+    end
+
+    return bestTarget, bestPart
+end
+
+-- Устанавливаем хук на пакет выстрела
+if WeaponPacketsTable and WeaponPacketsTable.startShoot then
+    local oldSend = WeaponPacketsTable.startShoot.send
+    
+    WeaponPacketsTable.startShoot.send = function(data)
+        if SILENT_AIM.Enabled and type(data) == "table" then
+            local target, part = getSilentAimTarget()
+            if target and part then
+                -- Подменяем координаты выстрела на позицию врага
+                local newData = table.clone(data)
+                
+                -- Наш выстрел начинается из камеры, но летит в голову
+                newData.origin = workspace.CurrentCamera.CFrame.Position
+                
+                -- Направление на врага
+                local dir = (part.Position - newData.origin).Unit
+                newData.direction = dir
+                
+                -- Точка попадания (позиция головы)
+                newData.position = part.Position
+                newData.hitPoint = part.Position
+                
+                -- Некоторые игры требуют конкретный instance (hitPart)
+                newData.hitPart = part
+                newData.instance = part
+                
+                return oldSend(newData)
+            end
+        end
+        return oldSend(data)
+    end
+    print("[SLAUGHTER] Silent Aim Hook установлен.")
+else
+    print("[SLAUGHTER] WeaponPackets не найден в памяти! Silent Aim не будет работать.")
+end
+
+-- UI для Silent Aim
+local silentSettings = makeCollapsible(tabs["COMBAT"].Container, "Silent Aim Settings", true)
+
+makeToggle(silentSettings, "Enable Silent Aim", false, function(v)
+    SILENT_AIM.Enabled = v
+end)
+
+makeSlider(silentSettings, "Silent Aim FOV", 10, 500, 200, function(v)
+    SILENT_AIM.FOV = v
+end)
+
+makeToggle(silentSettings, "Target Players", true, function(v)
+    SILENT_AIM.TargetPlayers = v
+end)
+
+makeToggle(silentSettings, "Target Bots", true, function(v)
+    SILENT_AIM.TargetBots = v
+end)
 -- =========================================================
 -- RAGE: Aimbot главный тумблер + под-окно настроек
 -- =========================================================
@@ -2726,9 +2913,9 @@ local FAST_ALIVE = {
 -- Эмулируем нажатие пробела: сначала executor keypress, потом VIM
 local function pressSpace()
     local ok = pcall(function()
-        keypress(Enum.KeyCode.Space, true)
+        keypress(32)
         task.wait(0.02)
-        keypress(Enum.KeyCode.Space, false)
+        keyrelease(32)
     end)
     if ok then return end
 
@@ -3300,6 +3487,18 @@ local function unloadScript()
     end
 
     -- =========================================================
+    -- 1.5) RAPID FIRE — стоп + возврат оригинальной функции
+    -- =========================================================
+    if RAPID_CONFIG then RAPID_CONFIG.Enabled = false end
+    if rapidFireConnection then
+        pcall(function() rapidFireConnection:Disconnect() end)
+        rapidFireConnection = nil
+    end
+    if WeaponClient and originalFire then
+        pcall(function() WeaponClient.fire = originalFire end)
+    end
+
+    -- =========================================================
     -- 2) Bunny Hop — стоп + скорость на дефолт + Strafe стоп
     -- =========================================================
     if BUNNY_HOP then
@@ -3372,7 +3571,6 @@ local function unloadScript()
         end
         pcall(restoreAllMagic)
     end
-
 
     -- =========================================================
     -- 5.1) Noclip — стоп
@@ -3511,7 +3709,7 @@ local function unloadScript()
         pcall(function() task.cancel(fpsLoopTask) end)
         fpsLoopTask = nil
     end
-    MINI_HUD_FPS_FRAMES = 0
+    _G.MINI_HUD_FPS_FRAMES = 0
 
     print("[SLAUGHTER] Fully unloaded. All GUI and connections removed.")
 end
@@ -3756,465 +3954,6 @@ local function notify(title, text, duration, accentColor)
 end
 
 -- =========================================================
--- ИНТРО v2 — глитч + вращающееся кольцо + scan-line + шум
--- =========================================================
-local function runIntro()
-    local IntroGui = Instance.new("ScreenGui")
-    IntroGui.Name = "SlaughterIntro"
-    IntroGui.ResetOnSpawn = false
-    IntroGui.IgnoreGuiInset = true
-    IntroGui.DisplayOrder = 998
-    IntroGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-    pcall(function() IntroGui.Parent = CoreGui end)
-    if not IntroGui.Parent then IntroGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
-
-    -- ===== ЗАДНИК =====
-    local Backdrop = Instance.new("Frame")
-    Backdrop.Size = UDim2.new(1, 0, 1, 0)
-    Backdrop.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-    Backdrop.BackgroundTransparency = 1
-    Backdrop.BorderSizePixel = 0
-    Backdrop.ZIndex = 1
-    Backdrop.Parent = IntroGui
-
-    -- Сетка глитч-линий на фоне
-    local staticLines = {}
-    for i = 1, 6 do
-        local line = Instance.new("Frame")
-        line.Size = UDim2.new(1, 0, 0, 1)
-        line.Position = UDim2.new(0, 0, math.random(), 0)
-        line.BackgroundColor3 = Color3.fromRGB(255, 30, 30)
-        line.BackgroundTransparency = 0.85
-        line.BorderSizePixel = 0
-        line.ZIndex = 2
-        line.Parent = IntroGui
-        table.insert(staticLines, line)
-    end
-
-    task.spawn(function()
-        while Backdrop.Parent do
-            for _, line in ipairs(staticLines) do
-                if line.Parent then
-                    line.Position = UDim2.new(0, 0, math.random(), 0)
-                end
-            end
-            task.wait(0.15)
-        end
-    end)
-
-    -- ===== ГЛАВНОЕ ОКНО =====
-    local LoadWindow = Instance.new("Frame")
-    LoadWindow.Size = UDim2.new(0, 380, 0, 160)
-    LoadWindow.Position = UDim2.new(0.5, -190, 0.5, -80)
-    LoadWindow.BackgroundColor3 = Color3.fromRGB(12, 12, 15)
-    LoadWindow.BorderSizePixel = 0
-    LoadWindow.BackgroundTransparency = 1
-    LoadWindow.ZIndex = 5
-    LoadWindow.Parent = IntroGui
-
-    local LC = Instance.new("UICorner")
-    LC.CornerRadius = UDim.new(0, 14)
-    LC.Parent = LoadWindow
-
-    local LS = Instance.new("UIStroke")
-    LS.Color = Color3.fromRGB(255, 30, 30)
-    LS.Thickness = 1
-    LS.Transparency = 1
-    LS.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-    LS.Parent = LoadWindow
-
-    local LGlow = Instance.new("UIStroke")
-    LGlow.Color = Color3.fromRGB(255, 30, 30)
-    LGlow.Thickness = 4
-    LGlow.Transparency = 1
-    LGlow.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-    LGlow.Parent = LoadWindow
-
-    -- Фоновый градиент отдельным слоем (ZIndex = 0), чтобы не перекрывать детей
-    local LGBg = Instance.new("Frame")
-    LGBg.Size = UDim2.new(1, 0, 1, 0)
-    LGBg.BackgroundColor3 = Color3.fromRGB(12, 12, 15)
-    LGBg.BorderSizePixel = 0
-    LGBg.ZIndex = 0
-    LGBg.Parent = LoadWindow
-
-    local LGBgC = Instance.new("UICorner")
-    LGBgC.CornerRadius = UDim.new(0, 14)
-    LGBgC.Parent = LGBg
-
-    local LGrad = Instance.new("UIGradient")
-    LGrad.Color = ColorSequence.new{
-        ColorSequenceKeypoint.new(0, Color3.fromRGB(25, 8, 8)),
-        ColorSequenceKeypoint.new(0.5, Color3.fromRGB(12, 12, 15)),
-        ColorSequenceKeypoint.new(1, Color3.fromRGB(25, 8, 8)),
-    }
-    LGrad.Rotation = 135
-    LGrad.Parent = LGBg
-
-    local LTop = Instance.new("Frame")
-    LTop.Size = UDim2.new(1, -20, 0, 1)
-    LTop.Position = UDim2.new(0, 10, 0, 1)
-    LTop.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-    LTop.BackgroundTransparency = 1
-    LTop.BorderSizePixel = 0
-    LTop.Parent = LoadWindow
-
-    -- Логотип
-    local Logo = Instance.new("Frame")
-    Logo.Size = UDim2.new(0, 34, 0, 34)
-    Logo.Position = UDim2.new(0, 18, 0, 20)
-    Logo.BackgroundColor3 = Color3.fromRGB(255, 30, 30)
-    Logo.BorderSizePixel = 0
-    Logo.BackgroundTransparency = 1
-    Logo.Parent = LoadWindow
-
-    local LogoC = Instance.new("UICorner")
-    LogoC.CornerRadius = UDim.new(1, 0)
-    LogoC.Parent = Logo
-
-    local LogoGrad = Instance.new("UIGradient")
-    LogoGrad.Color = ColorSequence.new{
-        ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 80, 80)),
-        ColorSequenceKeypoint.new(1, Color3.fromRGB(180, 0, 0)),
-    }
-    LogoGrad.Rotation = 135
-    LogoGrad.Parent = Logo
-
-    local LogoText = Instance.new("TextLabel")
-    LogoText.Size = UDim2.new(1, 0, 1, 0)
-    LogoText.BackgroundTransparency = 1
-    LogoText.Text = "S"
-    LogoText.TextColor3 = Color3.fromRGB(255, 255, 255)
-    LogoText.TextSize = 18
-    LogoText.Font = Enum.Font.GothamBlack
-    LogoText.TextTransparency = 1
-    LogoText.Parent = Logo
-
-    -- Заголовок
-    local LT = Instance.new("TextLabel")
-    LT.Size = UDim2.new(1, -80, 0, 26)
-    LT.Position = UDim2.new(0, 64, 0, 20)
-    LT.BackgroundTransparency = 1
-    LT.Text = "SLAUGHTER"
-    LT.TextColor3 = Color3.fromRGB(255, 255, 255)
-    LT.TextSize = 24
-    LT.Font = Enum.Font.GothamBlack
-    LT.TextXAlignment = Enum.TextXAlignment.Left
-    LT.TextTransparency = 1
-    LT.Parent = LoadWindow
-
-    -- Глитч-тень заголовка
-    local LTGlitch = Instance.new("TextLabel")
-    LTGlitch.Size = UDim2.new(1, -80, 0, 26)
-    LTGlitch.Position = UDim2.new(0, 64, 0, 20)
-    LTGlitch.BackgroundTransparency = 1
-    LTGlitch.Text = "SLAUGHTER"
-    LTGlitch.TextColor3 = Color3.fromRGB(255, 30, 30)
-    LTGlitch.TextSize = 24
-    LTGlitch.Font = Enum.Font.GothamBlack
-    LTGlitch.TextXAlignment = Enum.TextXAlignment.Left
-    LTGlitch.TextTransparency = 1
-    LTGlitch.ZIndex = 4
-    LTGlitch.Parent = LoadWindow
-
-    task.spawn(function()
-        while LT.Parent do
-            if math.random() < 0.3 then
-                local offset = math.random(-3, 3)
-                LTGlitch.Position = UDim2.new(0, 64 + offset, 0, 20 + math.random(-1, 1))
-                LTGlitch.TextTransparency = 0.5
-                task.wait(0.05)
-                LTGlitch.TextTransparency = 1
-            end
-            task.wait(0.15)
-        end
-    end)
-
-    -- Версия
-    local LVer = Instance.new("TextLabel")
-    LVer.Size = UDim2.new(0, 80, 0, 14)
-    LVer.Position = UDim2.new(0, 64, 0, 46)
-    LVer.BackgroundTransparency = 1
-    LVer.Text = "VERSION v3.0"
-    LVer.TextColor3 = Color3.fromRGB(255, 140, 40)
-    LVer.TextSize = 10
-    LVer.Font = Enum.Font.GothamBold
-    LVer.TextXAlignment = Enum.TextXAlignment.Left
-    LVer.TextTransparency = 1
-    LVer.Parent = LoadWindow
-
-    -- Статус
-    local LStatus = Instance.new("TextLabel")
-    LStatus.Size = UDim2.new(1, -80, 0, 16)
-    LStatus.Position = UDim2.new(0, 64, 0, 66)
-    LStatus.BackgroundTransparency = 1
-    LStatus.Text = "Initializing..."
-    LStatus.TextColor3 = Color3.fromRGB(170, 170, 175)
-    LStatus.TextSize = 11
-    LStatus.Font = Enum.Font.Gotham
-    LStatus.TextXAlignment = Enum.TextXAlignment.Left
-    LStatus.TextTransparency = 1
-    LStatus.Parent = LoadWindow
-
-    -- Прогресс-бар
-    local BarTrack = Instance.new("Frame")
-    BarTrack.Size = UDim2.new(1, -36, 0, 4)
-    BarTrack.Position = UDim2.new(0, 18, 1, -22)
-    BarTrack.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
-    BarTrack.BorderSizePixel = 0
-    BarTrack.BackgroundTransparency = 1
-    BarTrack.Parent = LoadWindow
-
-    local BTC = Instance.new("UICorner")
-    BTC.CornerRadius = UDim.new(1, 0)
-    BTC.Parent = BarTrack
-
-    local BarFill = Instance.new("Frame")
-    BarFill.Size = UDim2.new(0, 0, 1, 0)
-    BarFill.BackgroundColor3 = Color3.fromRGB(255, 30, 30)
-    BarFill.BorderSizePixel = 0
-    BarFill.BackgroundTransparency = 1
-    BarFill.Parent = BarTrack
-
-    local BFC = Instance.new("UICorner")
-    BFC.CornerRadius = UDim.new(1, 0)
-    BFC.Parent = BarFill
-
-    local BarGrad = Instance.new("UIGradient")
-    BarGrad.Color = ColorSequence.new{
-        ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 30, 30)),
-        ColorSequenceKeypoint.new(1, Color3.fromRGB(255, 140, 40)),
-    }
-    BarGrad.Parent = BarFill
-
-    -- Проценты
-    local PercentLabel = Instance.new("TextLabel")
-    PercentLabel.Size = UDim2.new(0, 60, 0, 14)
-    PercentLabel.Position = UDim2.new(1, -76, 1, -28)
-    PercentLabel.BackgroundTransparency = 1
-    PercentLabel.Text = "0%"
-    PercentLabel.TextColor3 = Color3.fromRGB(255, 140, 40)
-    PercentLabel.TextSize = 11
-    PercentLabel.Font = Enum.Font.GothamBold
-    PercentLabel.TextXAlignment = Enum.TextXAlignment.Right
-    PercentLabel.TextTransparency = 1
-    PercentLabel.Parent = LoadWindow
-
-    -- ===== ВРАЩАЮЩЕЕСЯ КОЛЬЦО =====
-    local SpinnerContainer = Instance.new("Frame")
-    SpinnerContainer.Size = UDim2.new(0, 70, 0, 70)
-    SpinnerContainer.Position = UDim2.new(1, -95, 0.5, -35)
-    SpinnerContainer.BackgroundTransparency = 1
-    SpinnerContainer.ZIndex = 6
-    SpinnerContainer.Parent = LoadWindow
-
-    local OuterRing = Instance.new("Frame")
-    OuterRing.Size = UDim2.new(1, 0, 1, 0)
-    OuterRing.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
-    OuterRing.BorderSizePixel = 0
-    OuterRing.BackgroundTransparency = 1
-    OuterRing.Parent = SpinnerContainer
-
-    local ORC = Instance.new("UICorner")
-    ORC.CornerRadius = UDim.new(1, 0)
-    ORC.Parent = OuterRing
-
-    local ORS = Instance.new("UIStroke")
-    ORS.Color = Color3.fromRGB(45, 45, 50)
-    ORS.Thickness = 3
-    ORS.Transparency = 1
-    ORS.Parent = OuterRing
-
-    local Spinner1 = Instance.new("Frame")
-    Spinner1.Size = UDim2.new(1, 0, 1, 0)
-    Spinner1.BackgroundTransparency = 1
-    Spinner1.Parent = SpinnerContainer
-
-    local S1C = Instance.new("UICorner")
-    S1C.CornerRadius = UDim.new(1, 0)
-    S1C.Parent = Spinner1
-
-    local S1S = Instance.new("UIStroke")
-    S1S.Color = Color3.fromRGB(255, 30, 30)
-    S1S.Thickness = 3
-    S1S.Transparency = 1
-    S1S.Parent = Spinner1
-
-    local Spinner2 = Instance.new("Frame")
-    Spinner2.Size = UDim2.new(1, -8, 1, -8)
-    Spinner2.Position = UDim2.new(0, 4, 0, 4)
-    Spinner2.BackgroundTransparency = 1
-    Spinner2.Parent = SpinnerContainer
-
-    local S2C = Instance.new("UICorner")
-    S2C.CornerRadius = UDim.new(1, 0)
-    S2C.Parent = Spinner2
-
-    local S2S = Instance.new("UIStroke")
-    S2S.Color = Color3.fromRGB(255, 140, 40)
-    S2S.Thickness = 2
-    S2S.Transparency = 1
-    S2S.Parent = Spinner2
-
-    local Dot = Instance.new("Frame")
-    Dot.Size = UDim2.new(0, 8, 0, 8)
-    Dot.AnchorPoint = Vector2.new(0.5, 0.5)
-    Dot.Position = UDim2.new(1, -4, 0.5, 0)
-    Dot.BackgroundColor3 = Color3.fromRGB(255, 30, 30)
-    Dot.BorderSizePixel = 0
-    Dot.BackgroundTransparency = 1
-    Dot.ZIndex = 7
-    Dot.Parent = SpinnerContainer
-
-    local DC = Instance.new("UICorner")
-    DC.CornerRadius = UDim.new(1, 0)
-    DC.Parent = Dot
-
-    -- Scan-line (пробегает по окну)
-    local ScanLine = Instance.new("Frame")
-    ScanLine.Size = UDim2.new(1, 0, 0, 2)
-    ScanLine.Position = UDim2.new(0, 0, 0, 0)
-    ScanLine.BackgroundColor3 = Color3.fromRGB(255, 30, 30)
-    ScanLine.BackgroundTransparency = 0.7
-    ScanLine.BorderSizePixel = 0
-    ScanLine.ZIndex = 8
-    ScanLine.Parent = LoadWindow
-
-    -- ===== АНИМАЦИЯ ВРАЩЕНИЯ =====
-    local spinning = true
-    task.spawn(function()
-        while spinning do
-            Spinner1.Rotation = (Spinner1.Rotation + 6) % 360
-            Spinner2.Rotation = (Spinner2.Rotation - 4) % 360
-            Dot.Position = UDim2.new(
-                0.5 + math.cos(math.rad(Spinner1.Rotation)) * 0.5,
-                0,
-                0.5 + math.sin(math.rad(Spinner1.Rotation)) * 0.5,
-                0
-            )
-            task.wait(0.016)
-        end
-    end)
-
-    task.spawn(function()
-        task.wait(0.5)  -- ждём пока окно появится
-        while ScanLine.Parent do
-            ScanLine.Position = UDim2.new(0, 0, 0, 0)
-            ScanLine.BackgroundTransparency = 0.5
-            TweenService:Create(ScanLine, TweenInfo.new(1.2, Enum.EasingStyle.Linear), {
-                Position = UDim2.new(0, 0, 1, 0),
-                BackgroundTransparency = 1
-            }):Play()
-            task.wait(1.5)
-        end
-    end)
-
-    -- ===== ПОЯВЛЕНИЕ =====
-    TweenService:Create(Backdrop, TweenInfo.new(0.4), {BackgroundTransparency = 0.4}):Play()
-    TweenService:Create(LoadWindow, TweenInfo.new(0.4), {BackgroundTransparency = 0}):Play()
-    TweenService:Create(LS, TweenInfo.new(0.4), {Transparency = 0}):Play()
-    TweenService:Create(LGlow, TweenInfo.new(0.4), {Transparency = 0.8}):Play()
-    TweenService:Create(LTop, TweenInfo.new(0.4), {BackgroundTransparency = 0.9}):Play()
-    TweenService:Create(Logo, TweenInfo.new(0.4), {BackgroundTransparency = 0}):Play()
-    TweenService:Create(LogoText, TweenInfo.new(0.4), {TextTransparency = 0}):Play()
-    TweenService:Create(LT, TweenInfo.new(0.4), {TextTransparency = 0}):Play()
-    TweenService:Create(LVer, TweenInfo.new(0.4), {TextTransparency = 0}):Play()
-    TweenService:Create(LStatus, TweenInfo.new(0.4), {TextTransparency = 0}):Play()
-    TweenService:Create(BarTrack, TweenInfo.new(0.4), {BackgroundTransparency = 0}):Play()
-    TweenService:Create(BarFill, TweenInfo.new(0.4), {BackgroundTransparency = 0}):Play()
-    TweenService:Create(ORS, TweenInfo.new(0.4), {Transparency = 0}):Play()
-    TweenService:Create(S1S, TweenInfo.new(0.4), {Transparency = 0}):Play()
-    TweenService:Create(S2S, TweenInfo.new(0.4), {Transparency = 0.3}):Play()
-    TweenService:Create(Dot, TweenInfo.new(0.4), {BackgroundTransparency = 0}):Play()
-    TweenService:Create(PercentLabel, TweenInfo.new(0.4), {TextTransparency = 0}):Play()
-
-    task.wait(0.4)
-
-    local totalDuration = 2.4
-    local elapsed = 0
-    local lastStatusIdx = -1
-
-    local statuses = {
-        {p = 0.15, t = "Initializing..."},
-        {p = 0.35, t = "Injecting payload..."},
-        {p = 0.55, t = "Loading modules..."},
-        {p = 0.75, t = "Building interface..."},
-        {p = 0.90, t = "Applying theme..."},
-        {p = 1.00, t = "Ready."},
-    }
-
-    local conn
-    conn = RunService.Heartbeat:Connect(function(dt)
-        elapsed = elapsed + dt
-        local progress = math.clamp(elapsed / totalDuration, 0, 1)
-
-        PercentLabel.Text = tostring(math.floor(progress * 100)) .. "%"
-        BarFill.Size = UDim2.new(progress, 0, 1, 0)
-
-        for i, s in ipairs(statuses) do
-            if progress >= s.p - 0.10 and i > lastStatusIdx then
-                lastStatusIdx = i
-                LStatus.Text = s.t
-            end
-        end
-
-        if progress >= 1 then
-            conn:Disconnect()
-            INTRO_CONNECTION = nil
-
-            task.wait(0.35)
-
-            -- Финальная вспышка
-            local flash = Instance.new("Frame")
-            flash.Size = UDim2.new(1, 0, 1, 0)
-            flash.BackgroundColor3 = Color3.fromRGB(255, 30, 30)
-            flash.BackgroundTransparency = 0.5
-            flash.BorderSizePixel = 0
-            flash.ZIndex = 20
-            flash.Parent = IntroGui
-
-            TweenService:Create(flash, TweenInfo.new(0.5), {BackgroundTransparency = 1}):Play()
-            task.delay(0.6, function()
-                if flash.Parent then flash:Destroy() end
-            end)
-
-            spinning = false
-
-            task.wait(0.15)
-
-            -- Исчезновение
-            TweenService:Create(Backdrop, TweenInfo.new(0.4), {BackgroundTransparency = 1}):Play()
-            TweenService:Create(LoadWindow, TweenInfo.new(0.4), {BackgroundTransparency = 1}):Play()
-            TweenService:Create(LS, TweenInfo.new(0.4), {Transparency = 1}):Play()
-            TweenService:Create(LGlow, TweenInfo.new(0.4), {Transparency = 1}):Play()
-            TweenService:Create(LTop, TweenInfo.new(0.4), {Transparency = 1}):Play()
-            TweenService:Create(Logo, TweenInfo.new(0.4), {BackgroundTransparency = 1}):Play()
-            TweenService:Create(LogoText, TweenInfo.new(0.4), {TextTransparency = 1}):Play()
-            TweenService:Create(LT, TweenInfo.new(0.4), {TextTransparency = 1}):Play()
-            TweenService:Create(LVer, TweenInfo.new(0.4), {TextTransparency = 1}):Play()
-            TweenService:Create(LStatus, TweenInfo.new(0.4), {TextTransparency = 1}):Play()
-            TweenService:Create(BarTrack, TweenInfo.new(0.4), {BackgroundTransparency = 1}):Play()
-            TweenService:Create(BarFill, TweenInfo.new(0.4), {BackgroundTransparency = 1}):Play()
-            TweenService:Create(ORS, TweenInfo.new(0.4), {Transparency = 1}):Play()
-            TweenService:Create(S1S, TweenInfo.new(0.4), {Transparency = 1}):Play()
-            TweenService:Create(S2S, TweenInfo.new(0.4), {Transparency = 1}):Play()
-            TweenService:Create(Dot, TweenInfo.new(0.4), {BackgroundTransparency = 1}):Play()
-            TweenService:Create(PercentLabel, TweenInfo.new(0.4), {TextTransparency = 1}):Play()
-
-            task.wait(0.45)
-
-            if IntroGui.Parent then IntroGui:Destroy() end
-
-            -- Показываем MiniHud СКРЫТЫМ, но открываем GUI через openGUI()
-            ScreenGui.Enabled = true
-            guiVisible = false  -- чтобы openGUI сработал
-            MiniHud.Visible = false
-            if openGUI then openGUI() end
-        end
-    end)
-end
-
--- =========================================================
 -- СТАРТ
 -- =========================================================
 notify("SLAUGHTER", "Full Supported", 2, Color3.fromRGB(80, 255, 120))
@@ -4224,6 +3963,8 @@ task.wait(0.3)
 notify("SLAUGHTER", "3.0 — full support enabled", 3, Color3.fromRGB(255, 140, 40))
 task.wait(0.6)
 
-runIntro()
+ScreenGui.Enabled = true
+guiVisible = false
+openGUI()
 
 print("[SLAUGHTER] 3.0 загружен! Бинд на K — открыть/закрыть GUI.")
