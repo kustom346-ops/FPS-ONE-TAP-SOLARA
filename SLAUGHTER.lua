@@ -40,8 +40,8 @@ pcall(function() ScreenGui.Parent = CoreGui end)
 if not ScreenGui.Parent then ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
 
 local Main = Instance.new("Frame")
-Main.Size = UDim2.new(0, 540, 0, 420)
-Main.Position = UDim2.new(0.5, -270, 0.5, -210)
+Main.Size = UDim2.new(0, 600, 0, 460) -- Увеличили ширину и высоту
+Main.Position = UDim2.new(0.5, -300, 0.5, -230)
 Main.BackgroundColor3 = Color3.fromRGB(12, 12, 14)
 Main.BorderSizePixel = 0
 Main.Active = true
@@ -221,7 +221,7 @@ CloseBtn.Size = UDim2.new(0, 28, 0, 28)
 CloseBtn.Position = UDim2.new(1, -38, 0.5, -14)
 CloseBtn.BackgroundColor3 = Color3.fromRGB(35, 15, 15)
 CloseBtn.BorderSizePixel = 0
-CloseBtn.Text = "✕"
+CloseBtn.Text = "X"
 CloseBtn.TextColor3 = Color3.fromRGB(220, 180, 180)
 CloseBtn.TextSize = 14
 CloseBtn.Font = Enum.Font.GothamBold
@@ -629,7 +629,7 @@ PCOCorner.CornerRadius = UDim.new(1, 0)
 PCOCorner.Parent = PCOnline
 
 pcall(function()
-    PCAvatar.Image = ("rbxthumb://type=AvatarHeadShot&id=%d&w=150&h=150"):format(LocalPlayer.UserId)
+    PCAvatar.Image = "https://www.roblox.com/headshot-thumbnail/image?userId="..LocalPlayer.UserId.."&width=150&height=150&format=png"
 end)
 
 local tabs = {}
@@ -1557,144 +1557,6 @@ speedSlider = makeSlider(rapidSettings, "Fire Rate Speed", 10, 100, 50, function
     end
 end)
 
--- =========================================================
--- SILENT AIM (Bytenet Hook)
--- =========================================================
-
-local SILENT_AIM = {
-    Enabled = false,
-    FOV = 200,
-    TargetPart = "Head",
-    TargetPlayers = true,
-    TargetBots = true,
-}
-
--- Безопасно ищем WeaponPackets в памяти
-local WeaponPacketsTable = nil
-for _, obj in ipairs(getgc(true)) do
-    if type(obj) == "table" and rawget(obj, "startShoot") then
-        WeaponPacketsTable = obj
-        break
-    end
-end
-
--- Функция поиска цели
-local function getSilentAimTarget()
-    local camera = workspace.CurrentCamera
-    local myChar = LocalPlayer.Character
-    if not myChar then return nil end
-
-    local screenCenter = Vector2.new(camera.ViewportSize.X / 2, camera.ViewportSize.Y / 2)
-    local bestTarget, bestPart, bestDist = nil, nil, SILENT_AIM.FOV
-
-    -- Игроки
-    if SILENT_AIM.TargetPlayers then
-        for _, plr in ipairs(Players:GetPlayers()) do
-            if plr ~= LocalPlayer and plr.Character then
-                local hum = plr.Character:FindFirstChildOfClass("Humanoid")
-                if hum and hum.Health > 0 then
-                    local part = plr.Character:FindFirstChild(SILENT_AIM.TargetPart) or plr.Character:FindFirstChild("HumanoidRootPart")
-                    if part then
-                        local sp, onScreen = camera:WorldToViewportPoint(part.Position)
-                        if onScreen and sp.Z > 0 then
-                            local dist = (Vector2.new(sp.X, sp.Y) - screenCenter).Magnitude
-                            if dist < bestDist then
-                                bestDist = dist
-                                bestTarget = plr.Character
-                                bestPart = part
-                            end
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    -- Боты
-    if SILENT_AIM.TargetBots then
-        local function scan(container)
-            for _, obj in ipairs(container:GetChildren()) do
-                if obj:IsA("Model") and obj ~= myChar and not Players:GetPlayerFromCharacter(obj) then
-                    local hum = obj:FindFirstChildOfClass("Humanoid")
-                    if hum and hum.Health > 0 then
-                        local part = obj:FindFirstChild(SILENT_AIM.TargetPart) or obj:FindFirstChild("HumanoidRootPart")
-                        if part then
-                            local sp, onScreen = camera:WorldToViewportPoint(part.Position)
-                            if onScreen and sp.Z > 0 then
-                                local dist = (Vector2.new(sp.X, sp.Y) - screenCenter).Magnitude
-                                if dist < bestDist then
-                                    bestDist = dist
-                                    bestTarget = obj
-                                    bestPart = part
-                                end
-                            end
-                        end
-                    end
-                elseif obj:IsA("Folder") then
-                    scan(obj)
-                end
-            end
-        end
-        scan(workspace)
-    end
-
-    return bestTarget, bestPart
-end
-
--- Устанавливаем хук на пакет выстрела
-if WeaponPacketsTable and WeaponPacketsTable.startShoot then
-    local oldSend = WeaponPacketsTable.startShoot.send
-    
-    WeaponPacketsTable.startShoot.send = function(data)
-        if SILENT_AIM.Enabled and type(data) == "table" then
-            local target, part = getSilentAimTarget()
-            if target and part then
-                -- Подменяем координаты выстрела на позицию врага
-                local newData = table.clone(data)
-                
-                -- Наш выстрел начинается из камеры, но летит в голову
-                newData.origin = workspace.CurrentCamera.CFrame.Position
-                
-                -- Направление на врага
-                local dir = (part.Position - newData.origin).Unit
-                newData.direction = dir
-                
-                -- Точка попадания (позиция головы)
-                newData.position = part.Position
-                newData.hitPoint = part.Position
-                
-                -- Некоторые игры требуют конкретный instance (hitPart)
-                newData.hitPart = part
-                newData.instance = part
-                
-                return oldSend(newData)
-            end
-        end
-        return oldSend(data)
-    end
-    print("[SLAUGHTER] Silent Aim Hook установлен.")
-else
-    print("[SLAUGHTER] WeaponPackets не найден в памяти! Silent Aim не будет работать.")
-end
-
--- UI для Silent Aim
-local silentSettings = makeCollapsible(tabs["COMBAT"].Container, "Silent Aim Settings", true)
-
-makeToggle(silentSettings, "Enable Silent Aim", false, function(v)
-    SILENT_AIM.Enabled = v
-end)
-
-makeSlider(silentSettings, "Silent Aim FOV", 10, 500, 200, function(v)
-    SILENT_AIM.FOV = v
-end)
-
-makeToggle(silentSettings, "Target Players", true, function(v)
-    SILENT_AIM.TargetPlayers = v
-end)
-
-makeToggle(silentSettings, "Target Bots", true, function(v)
-    SILENT_AIM.TargetBots = v
-end)
 -- =========================================================
 -- RAGE: Aimbot главный тумблер + под-окно настроек
 -- =========================================================
