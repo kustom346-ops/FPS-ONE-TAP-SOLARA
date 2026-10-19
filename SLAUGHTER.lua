@@ -2981,6 +2981,128 @@ makeSlider(tabs["Misc"].Container, "Hitbox Size", 2, 30, 10, function(v)
 end)
 
 -- =========================================================
+-- MISC: CUSTOM KILL SOUND (Optimized for Luau limits)
+-- =========================================================
+
+local function setupKillSound()
+    local KILLSOUND = {
+        Enabled = false,
+        HeadshotOnly = false,
+        Volume = 2,
+        CustomID = "rbxassetid://8679627751", -- Твой ID по умолчанию
+        OriginalHeadshotID = "rbxassetid://75228431293068",
+        OriginalKillID = "rbxassetid://128825426756691",
+        Connection1 = nil,
+        Connection2 = nil,
+    }
+
+    local function interceptKillSound(descendant)
+        if not KILLSOUND.Enabled then return end
+        if descendant:IsA("Sound") or descendant:IsA("AudioPlayer") then
+            task.wait(0.01) 
+            local id = tostring(descendant.SoundId or descendant.AssetId)
+            
+            if id == KILLSOUND.OriginalHeadshotID then
+                if descendant:IsA("Sound") then
+                    descendant.SoundId = KILLSOUND.CustomID
+                    descendant.Volume = KILLSOUND.Volume
+                else
+                    descendant.AssetId = KILLSOUND.CustomID
+                    descendant.Volume = KILLSOUND.Volume
+                end
+            elseif id == KILLSOUND.OriginalKillID and not KILLSOUND.HeadshotOnly then
+                if descendant:IsA("Sound") then
+                    descendant.SoundId = KILLSOUND.CustomID
+                    descendant.Volume = KILLSOUND.Volume
+                else
+                    descendant.AssetId = KILLSOUND.CustomID
+                    descendant.Volume = KILLSOUND.Volume
+                end
+            end
+        end
+    end
+
+    local function startKillSound()
+        if KILLSOUND.Connection1 then return end
+        KILLSOUND.Connection1 = workspace.DescendantAdded:Connect(interceptKillSound)
+        KILLSOUND.Connection2 = game:GetService("SoundService").DescendantAdded:Connect(interceptKillSound)
+    end
+
+    local function stopKillSound()
+        if KILLSOUND.Connection1 then
+            KILLSOUND.Connection1:Disconnect()
+            KILLSOUND.Connection1 = nil
+        end
+        if KILLSOUND.Connection2 then
+            KILLSOUND.Connection2:Disconnect()
+            KILLSOUND.Connection2 = nil
+        end
+    end
+
+    -- Сохраняем ссылку в глобальную таблицу для unload
+    getgenv().SLAUGHTER_KILLSOUND = KILLSOUND
+
+    makeToggle(tabs["Misc"].Container, "Kill Sound", false, function(v)
+        KILLSOUND.Enabled = v
+        if v then startKillSound() else stopKillSound() end
+    end)
+
+    local killSoundSettings = makeCollapsible(tabs["Misc"].Container, "Kill Sound Settings", false)
+
+    makeToggle(killSoundSettings, "Only Headshot", false, function(v)
+        KILLSOUND.HeadshotOnly = v
+    end)
+
+    makeSlider(killSoundSettings, "Volume", 1, 10, 2, function(v)
+        KILLSOUND.Volume = v
+    end)
+
+    local soundIdBtn = Instance.new("TextButton")
+    soundIdBtn.Size = UDim2.new(1, 0, 0, 38)
+    soundIdBtn.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+    soundIdBtn.BorderSizePixel = 0
+    soundIdBtn.Text = "Copy Current ID to Clipboard"
+    soundIdBtn.TextColor3 = Color3.fromRGB(200, 200, 210)
+    soundIdBtn.TextSize = 13
+    soundIdBtn.Font = Enum.Font.GothamMedium
+    soundIdBtn.Parent = killSoundSettings
+
+    local SIDCorner = Instance.new("UICorner")
+    SIDCorner.CornerRadius = UDim.new(0, 8)
+    SIDCorner.Parent = soundIdBtn
+
+    local SIDStroke = Instance.new("UIStroke")
+    SIDStroke.Color = Color3.fromRGB(50, 50, 55)
+    SIDStroke.Thickness = 1
+    SIDStroke.Parent = soundIdBtn
+
+    soundIdBtn.MouseEnter:Connect(function()
+        TweenService:Create(soundIdBtn, TweenInfo.new(0.15), {BackgroundColor3 = Color3.fromRGB(35, 35, 40)}):Play()
+    end)
+    soundIdBtn.MouseLeave:Connect(function()
+        TweenService:Create(soundIdBtn, TweenInfo.new(0.15), {BackgroundColor3 = Color3.fromRGB(25, 25, 25)}):Play()
+    end)
+
+    soundIdBtn.MouseButton1Click:Connect(function()
+        pcall(function() setclipboard(KILLSOUND.CustomID) end)
+        _notify("SLAUGHTER", "ID скопирован: " .. KILLSOUND.CustomID, 3, Color3.fromRGB(255, 200, 50))
+    end)
+
+    local currentIdLabel = Instance.new("TextLabel")
+    currentIdLabel.Size = UDim2.new(1, 0, 0, 18)
+    currentIdLabel.BackgroundTransparency = 1
+    currentIdLabel.Text = "Current ID: " .. KILLSOUND.CustomID
+    currentIdLabel.TextColor3 = Color3.fromRGB(255, 140, 40)
+    currentIdLabel.TextSize = 10
+    currentIdLabel.Font = Enum.Font.Gotham
+    currentIdLabel.TextXAlignment = Enum.TextXAlignment.Left
+    currentIdLabel.Parent = killSoundSettings
+end
+
+setupKillSound()
+
+
+-- =========================================================
 -- MISC: NOCLIP — проход сквозь стены
 -- =========================================================
 
@@ -3560,6 +3682,8 @@ local function unloadScript()
     ESP.Enabled.Name = false
     ESP.Enabled.Distance = false
 
+
+
     -- =========================================================
     -- 12) MiniHud FPS/Ping — отключаем соединение и таск
     -- =========================================================
@@ -3573,9 +3697,21 @@ local function unloadScript()
     end
     _G.MINI_HUD_FPS_FRAMES = 0
 
-    print("[SLAUGHTER] Fully unloaded. All GUI and connections removed.")
-end
+    -- =========================================================
+    -- 13) KILL SOUND — отключаем соединения
+    -- =========================================================
+    if getgenv().SLAUGHTER_KILLSOUND then
+        local ks = getgenv().SLAUGHTER_KILLSOUND
+        ks.Enabled = false
+        if ks.Connection1 then pcall(function() ks.Connection1:Disconnect() end) end
+        if ks.Connection2 then pcall(function() ks.Connection2:Disconnect() end) end
+        getgenv().SLAUGHTER_KILLSOUND = nil
+    end
 
+    print("[SLAUGHTER] Fully unloaded. All GUI and connections removed.")
+end -- <--- ВОТ ЭТОТ END ЗАКРЫВАЕТ ФУНКЦИЮ unloadScript
+
+-- Кнопка UNLOAD (теперь она снаружи функции)
 local UnloadBtn = Instance.new("TextButton")
 UnloadBtn.Size = UDim2.new(1, 0, 0, 40)
 UnloadBtn.BackgroundColor3 = Color3.fromRGB(40, 10, 10)
